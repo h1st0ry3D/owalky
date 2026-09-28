@@ -28,6 +28,13 @@ SPEED_MAX_KMH = 12.0
 SPEED_STEP_KMH = 0.1
 DEFAULT_SPEED_KMH = 1.0
 
+#: With the handle bar down the pad only accepts walking speeds. The bar position
+#: is not readable over BLE, so the mode is chosen by the user.
+WALK_MAX_KMH = 6.0
+SPEED_CEILINGS = {"walk": WALK_MAX_KMH, "run": SPEED_MAX_KMH}
+DEFAULT_MODE = "walk"
+MODE_NAMES = tuple(SPEED_CEILINGS)
+
 #: Treadmill Data notifications are 10-20 bytes; anything larger is not one.
 MAX_NOTIFICATION_BYTES = 64
 
@@ -66,8 +73,16 @@ def is_valid_mac(value: object) -> bool:
     return True
 
 
-def clamp_speed(value: object) -> float:
+def max_speed_for(mode: object) -> float:
+    """The ceiling for a mode name. An unknown or missing mode means walk."""
+    return SPEED_CEILINGS.get(str(mode), SPEED_CEILINGS[DEFAULT_MODE])
+
+
+def clamp_speed(value: object, maximum: float = SPEED_MAX_KMH) -> float:
     """Clamp ``value`` to the pad's range and round it to 0.1 km/h.
+
+    ``maximum`` is the ceiling for the current mode, never above the pad's own
+    maximum.
 
     Raises:
         ValueError: the value is not a finite number. Input from the socket or the
@@ -79,8 +94,9 @@ def clamp_speed(value: object) -> float:
         raise ValueError(f"speed is not a number: {value!r}") from exc
     if not math.isfinite(speed):
         raise ValueError("speed must be finite")
+    ceiling = min(float(maximum), SPEED_MAX_KMH)
     speed = round(speed / SPEED_STEP_KMH) * SPEED_STEP_KMH
-    return min(SPEED_MAX_KMH, max(SPEED_MIN_KMH, round(speed, 1)))
+    return min(ceiling, max(SPEED_MIN_KMH, round(speed, 1)))
 
 
 def encode_speed(speed: object) -> bytes:

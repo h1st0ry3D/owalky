@@ -57,6 +57,16 @@ interpreted as anything but an address.
 ## Using it
 
 - **Left click** the bar icon to open the panel, **right click** to stop the belt.
+- **Walk mode** caps the belt at 6.0 km/h, which is all the pad allows while the
+  handle bar is down. **Run mode** lifts the cap to 12.0. The pad does not report
+  which mode it is in, so the button in the panel is the source of truth and the
+  choice is remembered. Dropping from run to walk lowers the speed if it is over
+  the new limit.
+- **Walk mode** caps the belt at 6.0 km/h, which is all the pad allows while the
+  handle bar is down. **Run mode** lifts the cap to 12.0. The pad does not report
+  which mode it is in, so the button in the panel is the source of truth, and the
+  choice is remembered. Dropping from run to walk lowers the speed if it is over
+  the new limit.
 - **Connect** starts a background daemon that claims the pad. It survives a shell
   reload, so the bar keeps working after `omarchy-shell` restarts.
 - **Start**, **Pause**, **Resume** and **Stop** act on the belt. **Stop** leaves the
@@ -79,6 +89,8 @@ The helper is usable on its own, which is handy when the shell is not running:
 python3 -I owalky_helper.py status                     # one line of JSON
 python3 -I owalky_helper.py --mac AA:BB:CC:DD:EE:FF connect
 python3 -I owalky_helper.py --mac AA:BB:CC:DD:EE:FF speed 3.5
+echo '{"mode":"run"}' | python3 -I owalky_helper.py config-set   # lift the 6.0 cap
+echo '{"mode":"run"}' | python3 -I owalky_helper.py config-set   # lift the 6.0 cap
 python3 -I owalky_helper.py log 40
 ```
 
@@ -113,7 +125,7 @@ quirks of this particular pad.
 - **No privileges.** Nothing is installed, elevated or run through a shell. The
   helper runs as your user with an absolute interpreter path and a fixed environment.
 - **Files written**, all `0600` inside `0700` directories:
-  - `~/.config/owalky/config.json` — MAC address and last speed
+  - `~/.config/owalky/config.json` — MAC address, last speed, walk/run mode
   - `~/.local/state/owalky/state.json` — current state
   - `~/.local/state/owalky/owalky.log` — debug log, rotated at 256 KiB
   - `~/.local/state/owalky/daemon.pid`, `daemon.sock` — daemon identity and socket

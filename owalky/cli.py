@@ -17,10 +17,10 @@ import time
 
 from . import __version__
 from .daemon import run_daemon
-from .ftms import clamp_speed
+from .ftms import DEFAULT_MODE, clamp_speed, max_speed_for
 from .identity import daemon_alive, stop_daemon
 from .ipc import DaemonUnavailable, send_command
-from .state import load_state, resolve_mac, save_config, save_state, status_document
+from .state import load_config, load_state, resolve_mac, save_config, save_state, status_document
 from .storage import (
     LOG_FILE,
     MAX_CONFIG_BYTES,
@@ -155,7 +155,13 @@ def command_forward(arguments: argparse.Namespace) -> int:
     """Forward a belt command to the daemon and report what it answered."""
     command = arguments.command
     if command == "speed":
-        speed = clamp_speed(arguments.value)
+        ceiling = max_speed_for(load_config().get("mode", DEFAULT_MODE))
+        speed = clamp_speed(arguments.value, ceiling)
+        if float(arguments.value) > ceiling:
+            print(
+                f"clamped to {ceiling:.1f} km/h: {arguments.value} is over the "
+                f"walk-mode limit, switch to run mode for more"
+            )
         save_config({"lastSpeed": speed})
         with state_dir() as dir_fd:
             log_append(dir_fd, f"speed {speed} km/h requested")
@@ -315,10 +321,10 @@ def _parse_config(payload: bytes) -> dict:
     return document
 
 
-def main_entry() -> int:
+def main_entry(argv: list[str] | None = None) -> int:
     """Turn the expected failures into one clean line and an exit status."""
     try:
-        return main()
+        return main(argv)
     except (StorageError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_FAILED

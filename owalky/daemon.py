@@ -26,6 +26,7 @@ import time
 
 from .ftms import (
     CONTROL_POINT_UUID,
+    DEFAULT_MODE,
     OP_PAUSE,
     OP_REQUEST_CONTROL,
     OP_START_RESUME,
@@ -34,10 +35,11 @@ from .ftms import (
     TreadmillSample,
     clamp_speed,
     encode_speed,
+    max_speed_for,
 )
 from .identity import write_record
 from .ipc import MAX_COMMAND_BYTES, MAX_REPLY_BYTES
-from .state import clean_state, load_state, save_state
+from .state import clean_state, load_config, load_state, save_state
 from .storage import PID_FILE, SOCKET_FILE, log_append, remove_file, state_dir, state_path
 
 SCAN_ATTEMPTS = 20
@@ -170,6 +172,10 @@ class PadDaemon:
             updates["distance"] = sample.distance_m
         self.publish(min_interval=PUBLISH_INTERVAL_SECONDS, **updates)
 
+    def ceiling(self) -> float:
+        """The speed ceiling for the mode the user has selected."""
+        return max_speed_for(load_config().get("mode", DEFAULT_MODE))
+
     async def _write_control(self, payload: bytes) -> None:
         if self.client is None:
             raise RuntimeError("no BLE link: press Connect first")
@@ -244,7 +250,7 @@ class PadDaemon:
         elif name == "speed":
             if not arguments:
                 raise ValueError("speed needs a value in km/h")
-            self.speed_kmh = clamp_speed(arguments[0])
+            self.speed_kmh = clamp_speed(arguments[0], self.ceiling())
             self.speed_payload = encode_speed(self.speed_kmh)
             await self._write_control(self.speed_payload)
             self.publish(speed=self.speed_kmh)

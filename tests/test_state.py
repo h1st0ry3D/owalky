@@ -228,7 +228,20 @@ class StatusDocumentTests(TempHomeTest):
         self.assertLess(len(json.dumps(document)), 4096)
         self.assertEqual(
             sorted(document),
-            ["connected", "daemon", "distance", "error", "lastSpeed", "log", "mac", "paused", "running", "speed"],
+            [
+                "connected",
+                "daemon",
+                "distance",
+                "error",
+                "lastSpeed",
+                "log",
+                "mac",
+                "maxSpeed",
+                "mode",
+                "paused",
+                "running",
+                "speed",
+            ],
         )
 
     def test_state_without_a_daemon_is_not_reported_as_connected(self):

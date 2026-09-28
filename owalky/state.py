@@ -15,7 +15,14 @@ import math
 import os
 import time
 
-from .ftms import clamp_speed, is_valid_mac, normalise_mac
+from .ftms import (
+    DEFAULT_MODE,
+    MODE_NAMES,
+    clamp_speed,
+    is_valid_mac,
+    max_speed_for,
+    normalise_mac,
+)
 from .identity import daemon_alive
 from .storage import (
     CONFIG_FILE,
@@ -102,6 +109,8 @@ def load_config() -> dict:
         config["mac"] = normalise_mac(document["mac"])
     if document.get("lastSpeed") is not None:
         store_speed(config, document["lastSpeed"])
+    if document.get("mode") in MODE_NAMES:
+        config["mode"] = document["mode"]
     return config
 
 
@@ -109,7 +118,7 @@ def save_config(updates: dict) -> dict:
     """Merge validated ``updates`` into ``config.json`` and publish it atomically."""
     if not isinstance(updates, dict):
         raise StorageError("configuration must be a JSON object")
-    unknown = set(updates) - {"mac", "lastSpeed"}
+    unknown = set(updates) - {"mac", "lastSpeed", "mode"}
     if unknown:
         raise StorageError(f"unknown configuration keys: {', '.join(sorted(unknown))}")
     config = load_config()
@@ -120,6 +129,11 @@ def save_config(updates: dict) -> dict:
             config["mac"] = normalise_mac(updates["mac"])
     if updates.get("lastSpeed") is not None:
         store_speed(config, updates["lastSpeed"])
+    if "mode" in updates:
+        if updates["mode"] in MODE_NAMES:
+            config["mode"] = updates["mode"]
+        else:
+            raise StorageError(f"mode must be one of {', '.join(MODE_NAMES)}")
     with config_dir() as dir_fd:
         payload = json.dumps(config, indent=2, sort_keys=True).encode("utf-8") + b"\n"
         write_file(dir_fd, CONFIG_FILE, payload, MAX_CONFIG_BYTES)
@@ -159,7 +173,10 @@ def status_document() -> dict:
         state = clean_state(load_state(dir_fd))
         alive = daemon_alive(dir_fd)
     config = load_config()
+    mode = config.get("mode", DEFAULT_MODE)
     return {
+        "mode": mode,
+        "maxSpeed": max_speed_for(mode),
         "daemon": alive,
         "connected": bool(alive and state.get("connected")),
         "running": bool(alive and state.get("running")),

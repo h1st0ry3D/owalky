@@ -38,6 +38,11 @@ Panel {
     // The value the slider is being dragged to. Zero means "not dragging", and
     // the pad's minimum is 1.0, so it doubles as the flag.
     property double sliderPreview: 0.0
+    // Walk caps the belt at 6.0 km/h because the handle bar is down; run allows
+    // the full range. The pad does not report which mode it is in, so this is
+    // the user's choice and it is stored with the rest of the configuration.
+    property string mode: "walk"
+    readonly property double maxSpeed: mode === "run" ? 12.0 : 6.0
     property double distance: 0
     property bool connected: false
     property bool running: false
@@ -83,7 +88,19 @@ Panel {
         var speed = Number(value)
         if (!isFinite(speed)) return root.currentSpeed
         speed = Math.round(speed * 10) / 10
-        return Math.min(12.0, Math.max(1.0, speed))
+        return Math.min(root.maxSpeed, Math.max(1.0, speed))
+    }
+
+    function setMode(mode) {
+        if (mode !== "walk" && mode !== "run") return
+        root.mode = mode
+        root.saveConfig()
+        if (root.currentSpeed > root.maxSpeed) {
+            root.setSpeed(root.maxSpeed)
+            root.commandError = "walk mode tops out at 6.0 km/h, the speed was lowered"
+        } else if (!root.running) {
+            root.commandError = ""
+        }
     }
 
     // -- helper invocations
@@ -146,7 +163,11 @@ Panel {
     }
 
     function saveConfig() {
-        root.pendingConfig = JSON.stringify({ mac: root.mac, lastSpeed: root.currentSpeed }) + "\n"
+        root.pendingConfig = JSON.stringify({
+            mac: root.mac,
+            lastSpeed: root.currentSpeed,
+            mode: root.mode
+        }) + "\n"
         flushConfig()
     }
 
@@ -187,6 +208,7 @@ Panel {
     }
 
     function applyState(document) {
+        if (document.mode !== undefined && document.mode !== root.mode) root.mode = document.mode
         if (document.mac !== undefined && String(document.mac) !== root.mac) {
             root.mac = String(document.mac)
             root.macInput = root.mac
@@ -584,52 +606,76 @@ Panel {
                             }
                         }
 
-                        /*
-                         * The shell's slider only snaps whole numbers, so the
-                         * handlers round to half a kilometre. Dragging previews
-                         * locally; the belt is written once, on release.
-                         */
-                        PanelSlider {
-                            id: speedSlider
+                        Row {
                             width: parent.width
-                            bar: root.bar
-                            minimum: 1.0
-                            maximum: 12.0
-                            step: 0.5
-                            // one notch per half-kilometre, so a value can be aimed at
-                            tickCount: 23
-                            value: root.currentSpeed
-                            onMoved: function(v) { root.sliderPreview = Math.round(v * 2) / 2 }
-                            onReleased: function(v) {
-                                root.sliderPreview = 0
-                                root.setSpeed(Math.round(v * 2) / 2)
-                            }
-                        }
+                            spacing: Style.space(10)
 
-                        // The whole-kilometre labels, one under every other notch.
-                        Item {
-                            id: speedScale
-                            width: parent.width
-                            height: 11
+                            Column {
+                                width: parent.width - modeButton.width - Style.space(10)
+                                spacing: Style.space(6)
 
-                            Repeater {
-                                model: 12
-                                Text {
-                                    required property int index
-                                    // the scale is as wide as the track above it
-                                    x: (parent.width - width) * (index / 11)
-                                    text: index + 1
-                                    textFormat: Text.PlainText
-                                    color: Util.alpha(Color.foreground, 0.45)
-                                    font.family: Style.font.family
-                                    font.pixelSize: 8
+                                // The shell's slider only snaps whole numbers, so
+                                // the handlers round to half a kilometre. Dragging
+                                // previews locally; the belt is written on release.
+                                PanelSlider {
+                                    id: speedSlider
+                                    width: parent.width
+                                    bar: root.bar
+                                    minimum: 1.0
+                                    maximum: root.maxSpeed
+                                    step: 0.5
+                                    // one notch per half-kilometre, to aim at
+                                    tickCount: Math.round((root.maxSpeed - 1.0) / 0.5) + 1
+                                    value: root.currentSpeed
+                                    onMoved: function(v) { root.sliderPreview = Math.round(v * 2) / 2 }
+                                    onReleased: function(v) {
+                                        root.sliderPreview = 0
+                                        root.setSpeed(Math.round(v * 2) / 2)
+                                    }
                                 }
+
+                                // A whole kilometre under every other notch. As wide
+                                // as the track above it, not the whole row.
+                                Item {
+                                    id: speedScale
+                                    readonly property int stops: Math.round(root.maxSpeed)
+                                    width: parent.width
+                                    height: 11
+
+                                    Repeater {
+                                        model: speedScale.stops
+                                        Text {
+                                            required property int index
+                                            x: (parent.width - width) * (index / (parent.stops - 1))
+                                            text: index + 1
+                                            textFormat: Text.PlainText
+                                            color: Util.alpha(Color.foreground, 0.45)
+                                            font.family: Style.font.family
+                                            font.pixelSize: 8
+                                        }
+                                    }
+                                }
+                            }
+
+                            // The pad cannot say which mode it is in, so this is
+                            // the only place to change it. Walk caps the belt at 6.0.
+                            Button {
+                                id: modeButton
+                                // A constant width, so the track beside it does not
+                                // jump when the label changes.
+                                width: 68
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: root.mode === "run" ? "Run" : "Walk"
+                                enabled: !root.busy
+                                onClicked: root.setMode(root.mode === "run" ? "walk" : "run")
                             }
                         }
 
                         Text {
                             width: parent.width
-                            text: "Drag or click the scale for half-kilometre steps, 1.0 to 12.0 km/h. The step buttons move by 0.1, and the mouse wheel works here too."
+                            text: "Half-kilometre steps, 1.0 to " + root.maxSpeed.toFixed(1)
+                                + " km/h in " + (root.mode === "run" ? "run" : "walk")
+                                + " mode. The step buttons move by 0.1, and the mouse wheel works here too."
                             textFormat: Text.PlainText
                             color: Util.alpha(Color.foreground, 0.5)
                             font.family: Style.font.family
