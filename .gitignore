@@ -1,0 +1,24 @@
+# Byte-code and tool caches. Source lives in .py files, never in these.
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# A scratch virtualenv, if you make one to try something out.
+.venv/
+
+# A guard rather than a location. The panel writes the pad's MAC address to
+# ~/.config/owalky/config.json, outside this tree, but the plugin used to keep a
+# config.json in the plugin directory. The name is ignored at any depth, so a
+# stale copy holding a real address cannot be committed by accident.
+config.json
+
+# Editor and desktop files. Note that preview.png is committed: the marketplace
+# needs it at the repository root.
+.DS_Store
+*.swp
+*~
+
+# Local docs
+docs/

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "h1st0ry3d.owalky",
+  "name": "Owalky",
+  "version": "1.0.0",
+  "author": "h1st0ry3d",
+  "license": "MIT",
+  "description": "Control an FTMS walking pad over Bluetooth LE from the bar: connect, start, pause, resume, stop and set the speed in 0.1 km/h steps",
+  "kinds": ["bar-widget", "panel"],
+  "entryPoints": {
+    "barWidget": "Panel.qml",
+    "panel": "Panel.qml"
+  }
+}
