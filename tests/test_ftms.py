@@ -21,9 +21,12 @@ class SpeedEncodingTests(unittest.TestCase):
         self.assertEqual(ftms.clamp_speed("2.34"), 2.3)
 
     def test_speeds_are_clamped_to_the_pad_range(self):
-        self.assertEqual(ftms.clamp_speed(0.0), ftms.SPEED_MIN_KMH)
-        self.assertEqual(ftms.clamp_speed(-4), ftms.SPEED_MIN_KMH)
-        self.assertEqual(ftms.clamp_speed(99), ftms.SPEED_MAX_KMH)
+        self.assertEqual(ftms.SPEED_MIN_KMH, 1.0)
+        self.assertEqual(ftms.SPEED_MAX_KMH, 12.0)
+        self.assertEqual(ftms.clamp_speed(0.0), 1.0)
+        self.assertEqual(ftms.clamp_speed(0.5), 1.0)
+        self.assertEqual(ftms.clamp_speed(-4), 1.0)
+        self.assertEqual(ftms.clamp_speed(99), 12.0)
 
     def test_non_finite_and_non_numeric_speeds_are_refused(self):
         for value in (float("nan"), math.inf, -math.inf, "fast", None, object()):

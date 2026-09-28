@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Controls
-import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
@@ -36,6 +35,9 @@ Panel {
     property string macInput: ""
     property double currentSpeed: 1.0
     property double liveSpeed: 0.0
+    // The value the slider is being dragged to. Zero means "not dragging", and
+    // the pad's minimum is 1.0, so it doubles as the flag.
+    property double sliderPreview: 0.0
     property double distance: 0
     property bool connected: false
     property bool running: false
@@ -81,7 +83,7 @@ Panel {
         var speed = Number(value)
         if (!isFinite(speed)) return root.currentSpeed
         speed = Math.round(speed * 10) / 10
-        return Math.min(12.0, Math.max(0.5, speed))
+        return Math.min(12.0, Math.max(1.0, speed))
     }
 
     // -- helper invocations
@@ -189,7 +191,10 @@ Panel {
             root.mac = String(document.mac)
             root.macInput = root.mac
         }
-        if (document.lastSpeed !== undefined) root.currentSpeed = root.clampSpeed(document.lastSpeed)
+        if (document.lastSpeed !== undefined && root.sliderPreview === 0) {
+            var stored = root.clampSpeed(document.lastSpeed)
+            if (stored !== root.currentSpeed) root.currentSpeed = stored
+        }
         if (document.speed !== undefined && isFinite(Number(document.speed)))
             root.liveSpeed = Number(document.speed)
         if (document.distance !== undefined && isFinite(Number(document.distance)))
@@ -556,18 +561,80 @@ Panel {
                             Button { text: "+0.5"; enabled: !root.busy; onClicked: root.setSpeed(root.currentSpeed + 0.5) }
                         }
 
-                        Flow {
+                        Row {
                             width: parent.width
-                            spacing: Style.space(6)
+
+                            Text {
+                                width: parent.width / 2
+                                text: "Target speed"
+                                textFormat: Text.PlainText
+                                color: Util.alpha(Color.foreground, 0.6)
+                                font.family: Style.font.family
+                                font.pixelSize: 9
+                            }
+
+                            Text {
+                                width: parent.width / 2
+                                horizontalAlignment: Text.AlignRight
+                                text: (root.sliderPreview > 0 ? root.sliderPreview : root.currentSpeed).toFixed(1) + " km/h"
+                                textFormat: Text.PlainText
+                                color: Color.foreground
+                                font.family: Style.font.family
+                                font.pixelSize: 9
+                            }
+                        }
+
+                        /*
+                         * The shell's slider only snaps whole numbers, so the
+                         * handlers round to half a kilometre. Dragging previews
+                         * locally; the belt is written once, on release.
+                         */
+                        PanelSlider {
+                            id: speedSlider
+                            width: parent.width
+                            bar: root.bar
+                            minimum: 1.0
+                            maximum: 12.0
+                            step: 0.5
+                            // one notch per half-kilometre, so a value can be aimed at
+                            tickCount: 23
+                            value: root.currentSpeed
+                            onMoved: function(v) { root.sliderPreview = Math.round(v * 2) / 2 }
+                            onReleased: function(v) {
+                                root.sliderPreview = 0
+                                root.setSpeed(Math.round(v * 2) / 2)
+                            }
+                        }
+
+                        // The whole-kilometre labels, one under every other notch.
+                        Item {
+                            id: speedScale
+                            width: parent.width
+                            height: 11
+
                             Repeater {
-                                model: ["1.0", "2.0", "3.0", "4.0", "5.0", "6.0", "8.0", "10.0"]
-                                Button {
-                                    required property string modelData
-                                    text: modelData
-                                    enabled: !root.busy
-                                    onClicked: root.setSpeed(Number(modelData))
+                                model: 12
+                                Text {
+                                    required property int index
+                                    // the scale is as wide as the track above it
+                                    x: (parent.width - width) * (index / 11)
+                                    text: index + 1
+                                    textFormat: Text.PlainText
+                                    color: Util.alpha(Color.foreground, 0.45)
+                                    font.family: Style.font.family
+                                    font.pixelSize: 8
                                 }
                             }
+                        }
+
+                        Text {
+                            width: parent.width
+                            text: "Drag or click the scale for half-kilometre steps, 1.0 to 12.0 km/h. The step buttons move by 0.1, and the mouse wheel works here too."
+                            textFormat: Text.PlainText
+                            color: Util.alpha(Color.foreground, 0.5)
+                            font.family: Style.font.family
+                            font.pixelSize: 8
+                            wrapMode: Text.WordWrap
                         }
                     }
 

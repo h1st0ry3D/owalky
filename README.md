@@ -61,7 +61,9 @@ interpreted as anything but an address.
   reload, so the bar keeps working after `omarchy-shell` restarts.
 - **Start**, **Pause**, **Resume** and **Stop** act on the belt. **Stop** leaves the
   connection open, so **Start** is immediate; **Disconnect** closes it.
-- Speed buttons change the target in 0.1 km/h steps, between 0.5 and 12.0 km/h. The
+- The slider picks a target speed between 1.0 and 12.0 km/h in half-kilometre steps,
+  with a numbered scale underneath so a value like 3.0 can be aimed at directly. The
+  step buttons move it by 0.1 or 0.5, and the mouse wheel works over the slider. The
   last speed is remembered.
 - The panel shows the live speed reported by the pad, the current state, and the
   tail of the debug log.

@@ -23,7 +23,7 @@ OP_STOP = bytes.fromhex("0801")  # 0x08 + control value 0x01
 OP_PAUSE = bytes.fromhex("0802")  # 0x08 + control value 0x02
 OP_SET_TARGET_SPEED = 0x02  # 0x02 + uint16 speed in 0.01 km/h, little endian
 
-SPEED_MIN_KMH = 0.5
+SPEED_MIN_KMH = 1.0
 SPEED_MAX_KMH = 12.0
 SPEED_STEP_KMH = 0.1
 DEFAULT_SPEED_KMH = 1.0
