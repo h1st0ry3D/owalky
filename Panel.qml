@@ -30,7 +30,6 @@ Panel {
 
     readonly property int pollInterval: 1500
     readonly property int outputLimit: 4096
-    readonly property int logLimit: 8192
     readonly property int macLength: 17
 
     property string mac: ""
@@ -43,9 +42,8 @@ Panel {
     property bool paused: false
     property bool daemon: false
     property string errorText: ""
-    property string logPath: ""
-    property string message: ""
-    property string logTail: ""
+    // The last failed command, shown in the hero line until something works.
+    property string commandError: ""
     property string pendingConfig: ""
     // "connect" or "disconnect" while a link change is in flight, else empty.
     // The panel does not assume the outcome: it waits for the daemon to report.
@@ -117,10 +115,10 @@ Panel {
     function send(command) {
         if (commandProcess.running) return
         if (!root.mac) {
-            root.message = "Set the pad's BLE MAC address first"
+            root.commandError = "Set the pad's BLE MAC address first"
             return
         }
-        root.message = command.join(" ") + " …"
+        root.commandError = ""
         run(commandProcess, root.beltCommand(command[0], command.slice(1)))
         stateTimer.restart()
     }
@@ -132,7 +130,7 @@ Panel {
     function startLinkChange(name) {
         root.pending = name
         root.daemonSeen = false
-        root.message = name === "connect" ? "connecting …" : "disconnecting …"
+        root.commandError = ""
         send([name])
         stateTimer.restart()
     }
@@ -159,17 +157,8 @@ Panel {
         run(configProcess, root.localCommand("config-set"))
     }
 
-    function readLog() {
-        run(logProcess, root.localCommand("log", ["60"]))
-    }
 
     // These work before a MAC is configured, so they skip the belt path.
-    function sendLocal(command) {
-        if (commandProcess.running) return
-        root.message = command.join(" ") + " …"
-        run(commandProcess, root.localCommand(command[0], command.slice(1)))
-        logTimer.restart()
-    }
 
     // -- state
     // A link change is finished when the daemon reports the state that was asked
@@ -210,12 +199,12 @@ Panel {
         root.running = document.running === true
         root.paused = document.paused === true
         root.errorText = root.plain(document.error, 120)
-        root.logPath = root.plain(document.log, 200)
         settlePending(document)
     }
 
     function statusLabel() {
         if (root.errorText) return root.errorText
+        if (root.commandError) return root.plain(root.commandError, 80)
         if (root.pending === "connect") return "Connecting …"
         if (root.pending === "disconnect") return "Disconnecting …"
         if (!root.mac) return "Set MAC to connect"
@@ -292,8 +281,7 @@ Panel {
         }
         onExited: function(code) {
             var text = root.plain(buffer.trim(), 400)
-            if (text) root.message = text
-            else if (code !== 0) root.message = "the helper exited with " + code
+            root.commandError = code === 0 ? "" : (text || "the helper exited with " + code)
             buffer = ""
             if (code !== 0 && root.pending !== "") {
                 root.pending = ""
@@ -329,42 +317,12 @@ Panel {
         }
         onExited: function(code) {
             payload = ""
-            if (code !== 0) root.message = "could not save the configuration: " + root.plain(buffer.trim(), 200)
+            if (code !== 0) root.commandError = "could not save the configuration: "
             buffer = ""
             flushConfig()
         }
     }
 
-    Process {
-        id: logProcess
-        running: false
-        property string buffer: ""
-        property string failure: ""
-        stdout: SplitParser {
-            splitMarker: ""
-            onRead: function(chunk) {
-                logProcess.buffer += chunk
-                if (logProcess.buffer.length > root.logLimit) {
-                    logProcess.buffer = ""
-                    logProcess.signal(15)
-                    logKillTimer.start()
-                }
-            }
-        }
-        stderr: SplitParser {
-            splitMarker: ""
-            onRead: function(chunk) {
-                if (logProcess.failure.length <= 200) logProcess.failure += chunk
-            }
-        }
-        environment: root.helperEnvironment
-        clearEnvironment: true
-        onExited: function(code) {
-            root.logTail = code === 0 ? root.plain(buffer.trim(), root.logLimit) : ""
-            buffer = ""
-            failure = ""
-        }
-    }
 
     // The helper answers config-set in well under a second. This is the backstop
     // that keeps a wedged write from holding a process handle open forever.
@@ -374,16 +332,9 @@ Panel {
         onTriggered: if (configProcess.running) configProcess.signal(15)
     }
 
-    Timer {
-        id: logTimer
-        interval: 600
-        repeat: false
-        onTriggered: root.readLog()
-    }
 
     Timer { id: statusKillTimer; interval: 2000; onTriggered: statusPoll.signal(9) }
     Timer { id: commandKillTimer; interval: 2000; onTriggered: commandProcess.signal(9) }
-    Timer { id: logKillTimer; interval: 2000; onTriggered: logProcess.signal(9) }
 
     Timer {
         id: stateTimer
@@ -401,7 +352,7 @@ Panel {
         onTriggered: root.refresh()
     }
 
-    onOpenedChanged: if (opened) { root.refresh(); root.readLog() }
+    onOpenedChanged: if (opened) root.refresh()
 
     Component.onCompleted: root.refresh()
 
@@ -410,7 +361,6 @@ Panel {
     Component.onDestruction: {
         if (commandProcess.running) commandProcess.signal(15)
         if (statusPoll.running) statusPoll.signal(15)
-        if (logProcess.running) logProcess.signal(15)
         if (configProcess.running) configProcess.signal(15)
     }
 
@@ -532,7 +482,7 @@ Panel {
                                 enabled: !root.busy && root.pending === "" && root.validMac(root.macInput)
                                 onClicked: {
                                     if (!root.validMac(root.macInput)) {
-                                        root.message = "That is not a BLE MAC address"
+                                        root.commandError = "That is not a BLE MAC address"
                                         return
                                     }
                                     root.mac = root.macInput.trim().toUpperCase()
@@ -667,84 +617,6 @@ Panel {
                             font.family: Style.font.family
                             font.pixelSize: Style.font.bodySmall
                             wrapMode: Text.WordWrap
-                        }
-                    }
-
-                    Text {
-                        visible: root.message !== ""
-                        width: parent.width
-                        text: root.message
-                        textFormat: Text.PlainText
-                        color: Util.alpha(Color.foreground, 0.7)
-                        font.family: Style.font.family
-                        font.pixelSize: 9
-                        wrapMode: Text.WordWrap
-                    }
-
-                    PanelSeparator { foreground: Color.foreground }
-
-                    Column {
-                        width: parent.width
-                        spacing: Style.space(4)
-
-                        Text {
-                            width: parent.width
-                            text: "Debug log - " + root.logPath
-                            textFormat: Text.PlainText
-                            color: Util.alpha(Color.foreground, 0.6)
-                            font.family: Style.font.family
-                            font.pixelSize: 9
-                            elide: Text.ElideMiddle
-                        }
-
-                        Rectangle {
-                            width: parent.width
-                            height: 90
-                            radius: Style.cornerRadius
-                            color: Util.alpha(Color.foreground, 0.06)
-                            border.color: Util.alpha(Color.foreground, 0.12)
-                            clip: true
-
-                            Flickable {
-                                anchors.fill: parent
-                                anchors.margins: 6
-                                contentWidth: logText.width
-                                contentHeight: logText.height
-                                clip: true
-                                boundsBehavior: Flickable.StopAtBounds
-
-                                Text {
-                                    id: logText
-                                    width: 360
-                                    text: root.logTail || "no log entries yet"
-                                    textFormat: Text.PlainText
-                                    color: Util.alpha(Color.foreground, 0.75)
-                                    font.family: Style.font.family
-                                    font.pixelSize: 8
-                                    wrapMode: Text.Wrap
-                                }
-                            }
-                        }
-
-                        Row {
-                            spacing: Style.space(6)
-                            Button {
-                                text: "Refresh"
-                                onClicked: root.readLog()
-                            }
-                            Button {
-                                text: "Clear log"
-                                onClicked: root.sendLocal(["log-clear"])
-                            }
-                            Button {
-                                text: "Copy path"
-                                enabled: root.logPath !== ""
-                                onClicked: {
-                                    // fixed argv: the path cannot become a shell word
-                                    Quickshell.execDetached(["/usr/bin/wl-copy", "--", root.logPath])
-                                    root.message = "log path copied"
-                                }
-                            }
                         }
                     }
                 }
