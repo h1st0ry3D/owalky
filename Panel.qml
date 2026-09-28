@@ -47,6 +47,10 @@ Panel {
     property string message: ""
     property string logTail: ""
     property string pendingConfig: ""
+    // "connect" or "disconnect" while a link change is in flight, else empty.
+    // The panel does not assume the outcome: it waits for the daemon to report.
+    property string pending: ""
+    property bool daemonSeen: false
 
     // A 1.5s poll, and the config write that rides along with an action, must not
     // disable the controls. Only a belt command does.
@@ -125,6 +129,14 @@ Panel {
         send([name])
     }
 
+    function startLinkChange(name) {
+        root.pending = name
+        root.daemonSeen = false
+        root.message = name === "connect" ? "connecting …" : "disconnecting …"
+        send([name])
+        stateTimer.restart()
+    }
+
     function setSpeed(value) {
         var speed = root.clampSpeed(value)
         root.currentSpeed = speed
@@ -160,6 +172,29 @@ Panel {
     }
 
     // -- state
+    // A link change is finished when the daemon reports the state that was asked
+    // for. Before the daemon appears, the first polls still report no daemon, so
+    // a connect waits until one has been seen before it accepts that as a
+    // failure.
+    function settlePending(document) {
+        if (root.pending === "") return
+        var done = false
+        if (root.pending === "connect") {
+            if (document.daemon === true) root.daemonSeen = true
+            done = document.connected === true
+                || document.error
+                || (root.daemonSeen && document.daemon === false)
+        } else {
+            // While a daemon winds down it reports connected=false, so wait for
+            // the process to be gone as well before calling the disconnect over.
+            done = document.daemon === false && document.connected === false
+        }
+        if (done) {
+            root.pending = ""
+            root.daemonSeen = false
+        }
+    }
+
     function applyState(document) {
         if (document.mac !== undefined && String(document.mac) !== root.mac) {
             root.mac = String(document.mac)
@@ -176,15 +211,17 @@ Panel {
         root.paused = document.paused === true
         root.errorText = root.plain(document.error, 120)
         root.logPath = root.plain(document.log, 200)
+        settlePending(document)
     }
 
     function statusLabel() {
         if (root.errorText) return root.errorText
+        if (root.pending === "connect") return "Connecting …"
+        if (root.pending === "disconnect") return "Disconnecting …"
         if (!root.mac) return "Set MAC to connect"
         if (root.paused) return "Paused"
         if (root.running) return "Running " + root.liveSpeed.toFixed(1) + " km/h"
         if (root.connected) return "Connected"
-        if (root.daemon) return "Connecting …"
         return "Idle"
     }
 
@@ -258,6 +295,10 @@ Panel {
             if (text) root.message = text
             else if (code !== 0) root.message = "the helper exited with " + code
             buffer = ""
+            if (code !== 0 && root.pending !== "") {
+                root.pending = ""
+                root.daemonSeen = false
+            }
             root.refresh()
         }
     }
@@ -488,7 +529,7 @@ Panel {
                             Button {
                                 id: connectButton
                                 text: root.connected ? "Disconnect" : "Connect"
-                                enabled: !root.busy && root.validMac(root.macInput)
+                                enabled: !root.busy && root.pending === "" && root.validMac(root.macInput)
                                 onClicked: {
                                     if (!root.validMac(root.macInput)) {
                                         root.message = "That is not a BLE MAC address"
@@ -496,19 +537,36 @@ Panel {
                                     }
                                     root.mac = root.macInput.trim().toUpperCase()
                                     root.saveConfig()
-                                    if (root.connected) {
-                                        root.sendBelt("disconnect")
-                                    } else {
-                                        root.connected = true
-                                        root.message = "connecting …"
-                                        root.sendBelt("connect")
-                                        stateTimer.restart()
-                                    }
+                                    root.startLinkChange(root.connected ? "disconnect" : "connect")
                                 }
                             }
                         }
 
+                        Row {
+                            visible: root.pending !== ""
+                            spacing: Style.space(8)
+
+                            BusyIndicator {
+                                running: root.pending !== ""
+                                implicitWidth: 11
+                                implicitHeight: 11
+                            }
+
+                            Text {
+                                width: parent.width - 19
+                                text: root.pending === "connect"
+                                    ? "Connecting to " + root.mac + " - the pad advertises for about 30 seconds after power-on"
+                                    : "Disconnecting …"
+                                textFormat: Text.PlainText
+                                color: Util.alpha(Color.foreground, 0.7)
+                                font.family: Style.font.family
+                                font.pixelSize: 9
+                                wrapMode: Text.WordWrap
+                            }
+                        }
+
                         Text {
+                            visible: root.pending === ""
                             width: parent.width
                             text: root.connected
                                 ? "● Connected to " + root.mac
@@ -524,7 +582,7 @@ Panel {
                     PanelSeparator { foreground: Color.foreground }
 
                     Column {
-                        visible: root.connected && root.running
+                        visible: root.pending === "" && root.connected && root.running
                         width: parent.width
                         spacing: Style.space(8)
 
@@ -568,7 +626,7 @@ Panel {
                         spacing: Style.space(8)
 
                         Button {
-                            visible: root.connected && !root.running
+                            visible: root.pending === "" && root.connected && !root.running
                             width: parent.width
                             text: "Start"
                             enabled: !root.busy
@@ -576,7 +634,7 @@ Panel {
                         }
 
                         Button {
-                            visible: root.connected && root.running && !root.paused
+                            visible: root.pending === "" && root.connected && root.running && !root.paused
                             width: (parent.width - Style.space(8)) / 2
                             text: "Pause"
                             enabled: !root.busy
@@ -584,7 +642,7 @@ Panel {
                         }
 
                         Button {
-                            visible: root.connected && root.running && root.paused
+                            visible: root.pending === "" && root.connected && root.running && root.paused
                             width: (parent.width - Style.space(8)) / 2
                             text: "Resume"
                             enabled: !root.busy

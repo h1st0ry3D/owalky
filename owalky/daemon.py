@@ -47,6 +47,11 @@ STOP_SETTLE_SECONDS = 0.8
 COMMAND_DELAY_SECONDS = 0.2
 PUBLISH_INTERVAL_SECONDS = 1.0
 
+#: The pad notifies about every 1.4s while it is idle. Silence for four
+#: intervals means the link is gone even if the Bluetooth stack still calls it
+#: connected, which is what happens when the pad is powered off.
+MEASUREMENT_TIMEOUT_SECONDS = 6.0
+
 COMMANDS = ("ping", "status", "start", "pause", "resume", "stop", "disconnect", "speed")
 
 
@@ -61,6 +66,7 @@ class PadDaemon:
         self.distance_m = 0
         self.closing = False
         self._published_at = 0.0
+        self._last_measurement = 0.0
 
     # -- state
     def publish(self, *, min_interval: float = 0.0, **updates: object) -> None:
@@ -150,6 +156,9 @@ class PadDaemon:
 
     def _on_measurement(self, _sender: object, data: bytearray) -> None:
         """Fold one Treadmill Data notification into the published state."""
+        self._last_measurement = time.monotonic()
+        if self.closing:
+            return  # the link is going down; a late notification must not undo that
         sample = TreadmillSample.decode(bytes(data))
         if sample is None:
             return
@@ -251,6 +260,7 @@ class PadDaemon:
             os.chmod(socket_file, 0o600)
             identity = write_record(dir_fd)
         self.log(f"daemon {identity[0]} listening on {socket_file}")
+        self.publish(connected=False, running=False, paused=False, error="")
         try:
             await self._open_link()
             await self._hold_link()
@@ -266,10 +276,29 @@ class PadDaemon:
         """Watch the link until it drops, keeping the socket served meanwhile."""
         while not self.closing:
             await asyncio.sleep(LINK_POLL_SECONDS)
-            if self.client is not None and not self.client.is_connected:
-                self.log("BLE link lost")
-                self.publish(connected=False, running=False, error="link lost")
-                return
+            reason = self.link_loss_reason()
+            if reason is None:
+                continue
+            self.log(reason)
+            self.publish(connected=False, running=False, error=reason)
+            return
+
+    def link_loss_reason(self) -> str | None:
+        """Why the link counts as gone, or None while it is alive.
+
+        ``is_connected`` alone is not enough: powering the pad off leaves the
+        bearer up on the Bluetooth stack, which keeps reporting a connection
+        that no longer answers. Silence from the pad settles it.
+        """
+        if self.client is None:
+            return None
+        if not self.client.is_connected:
+            return "link lost"
+        if not self._last_measurement:
+            return None
+        if time.monotonic() - self._last_measurement > MEASUREMENT_TIMEOUT_SECONDS:
+            return "the pad stopped sending data"
+        return None
 
     async def _serve_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """Serve one connection: same-uid peer, one command, one reply."""
@@ -301,6 +330,9 @@ class PadDaemon:
             with contextlib.suppress(Exception):
                 await self.client.disconnect()
             self.client = None
+        # The last word belongs to the shutdown, not to a notification that
+        # arrived while the link was closing.
+        self.publish(connected=False, running=False, paused=False)
         server.close()
         with contextlib.suppress(Exception):
             await server.wait_closed()

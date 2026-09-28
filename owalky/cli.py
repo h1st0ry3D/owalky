@@ -20,7 +20,7 @@ from .daemon import run_daemon
 from .ftms import clamp_speed
 from .identity import daemon_alive, stop_daemon
 from .ipc import DaemonUnavailable, send_command
-from .state import load_state, resolve_mac, save_config, status_document
+from .state import load_state, resolve_mac, save_config, save_state, status_document
 from .storage import (
     LOG_FILE,
     MAX_CONFIG_BYTES,
@@ -206,6 +206,7 @@ def spawn_daemon(mac: str) -> None:
         if daemon_alive(dir_fd):
             raise RuntimeError("already connected")
         stop_daemon(dir_fd)
+        clear_connection_state(dir_fd)
         log_fd = os.open(
             LOG_FILE,
             os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -242,6 +243,16 @@ def start_failure() -> str:
     if reason:
         return f"the daemon did not start: {reason}"
     return "the daemon did not start; see the log for details"
+
+
+def clear_connection_state(dir_fd: int) -> None:
+    """Drop the previous session's connection from the published state.
+
+    Nothing is connected until a daemon says so. Without this the panel keeps
+    showing the last connection while the new daemon is still scanning for a pad
+    that is powered off.
+    """
+    save_state(dir_fd, {"connected": False, "running": False, "paused": False, "error": ""})
 
 
 def bluetoothctl_disconnect(mac: str) -> int:
