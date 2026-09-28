@@ -1,24 +1,31 @@
-# Byte-code and tool caches. Source lives in .py files, never in these.
+# byte-code and tool caches
 __pycache__/
 *.py[cod]
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
 
-# A scratch virtualenv, if you make one to try something out.
+# virtualenv
 .venv/
 
-# A guard rather than a location. The panel writes the pad's MAC address to
-# ~/.config/owalky/config.json, outside this tree, but the plugin used to keep a
-# config.json in the plugin directory. The name is ignored at any depth, so a
-# stale copy holding a real address cannot be committed by accident.
-config.json
-
-# Editor and desktop files. Note that preview.png is committed: the marketplace
-# needs it at the repository root.
-.DS_Store
+# editors
+.vscode/
+.idea/
 *.swp
+*.swo
 *~
+
+# agent instruction files
+CLAUDE.md
+SKILL.md
+.claude/
+.codex/
+.agents/
+.gemini/
+
+# clutter desktop files
+.DS_Store
+Thumbs.db
 
 # Local docs
 docs/
