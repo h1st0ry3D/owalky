@@ -20,6 +20,7 @@ from .daemon import run_daemon
 from .ftms import DEFAULT_MODE, clamp_speed, max_speed_for
 from .identity import daemon_alive, stop_daemon
 from .ipc import DaemonUnavailable, send_command
+from .scan import MAX_SCAN_SECONDS, MIN_SCAN_SECONDS, SCAN_SECONDS, scan_devices
 from .state import load_config, load_state, resolve_mac, save_config, save_state, status_document
 from .storage import (
     LOG_FILE,
@@ -58,6 +59,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"owalky {__version__}")
     subcommands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
     subcommands.add_parser("status", help="print one line of JSON for the panel")
+    scan_parser = subcommands.add_parser("scan", help="find pads advertising the FTMS service")
+    scan_parser.add_argument(
+        "seconds",
+        nargs="?",
+        type=float,
+        default=SCAN_SECONDS,
+        help=f"how long to listen, clamped to {MIN_SCAN_SECONDS}-{MAX_SCAN_SECONDS} seconds",
+    )
     subcommands.add_parser("connect", help="start the daemon and claim the pad")
     subcommands.add_parser("start", help="start the belt")
     subcommands.add_parser("pause", help="pause the belt")
@@ -81,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     handlers = {
         "status": command_status,
+        "scan": command_scan,
         "connect": command_connect,
         "disconnect": command_disconnect,
         "log": command_log,
@@ -98,6 +108,20 @@ def main(argv: list[str] | None = None) -> int:
 def command_status(_arguments: argparse.Namespace) -> int:
     """Print the panel's whole view of the plugin as one line of JSON."""
     print(json.dumps(status_document(), separators=(",", ":")))
+    return EXIT_OK
+
+
+def command_scan(arguments: argparse.Namespace) -> int:
+    """Print one JSON document listing the pads that advertised.
+
+    Only peripherals that advertise the Fitness Machine Service are listed, so the
+    panel never offers a device it cannot drive. Nothing is stored: picking one is
+    the user's action, and it goes through the same MAC validation as typing it.
+    """
+    devices = scan_devices(arguments.seconds)
+    print(json.dumps({"devices": devices}, separators=(",", ":")))
+    if not devices:
+        print("no pad advertised; power-cycle it, it advertises for about 30 seconds")
     return EXIT_OK
 
 

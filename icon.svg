@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"
+     fill="none" stroke="#ffffff" stroke-linecap="round" stroke-linejoin="round">
+  <title>Owalky</title>
+  <!-- the walker, mid-stride, hand on the console -->
+  <circle cx="13.32" cy="5.4" r="1.8" fill="#ffffff" stroke="none"/>
+  <polyline points="13.32,8.52 12.12,12.6" stroke-width="1.8"/>
+  <polyline points="12.12,12.6 9.48,14.52 7.56,16.68" stroke-width="1.8"/>
+  <polyline points="12.12,12.6 15.0,14.28 17.28,16.56" stroke-width="1.8"/>
+  <polyline points="13.32,9.72 10.56,9.96 7.56,10.2" stroke-width="1.56"/>
+  <!-- the console mast and its tilted screen -->
+  <polyline points="3.0,17.64 3.96,10.08" stroke-width="1.8"/>
+  <polygon points="0.844,8.63 6.96,7.39 7.556,10.33 1.44,11.57" fill="#ffffff" stroke="none"/>
+  <!-- the belt, last and thickest -->
+  <polyline points="1.08,18.24 23.64,18.24" stroke-width="3.72"/>
+</svg>

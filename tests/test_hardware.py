@@ -16,7 +16,7 @@ import os
 import subprocess
 import unittest
 
-from owalky import ftms
+from owalky import ftms, scan
 
 MAC = os.environ.get("OWALKY_TEST_MAC", "")
 BLUETOOTHCTL = "/usr/bin/bluetoothctl"
@@ -53,6 +53,16 @@ class HardwareFlowTests(unittest.TestCase):
 
     def tearDown(self):
         bluetooth("disconnect", self.mac)
+
+    def test_a_scan_finds_the_pad(self):
+        # Alphabetically first, and it has to be: this only works while the pad is
+        # advertising, which stops once the flow below claims it. unittest runs
+        # the methods of a class in name order.
+        devices = scan.scan_devices(10.0)
+        self.assertIn(self.mac, [device["mac"] for device in devices], f"the scan did not list the pad: {devices}")
+        pad = next(device for device in devices if device["mac"] == self.mac)
+        self.assertTrue(pad["name"], "the pad advertised without a name")
+        self.assertIsNotNone(pad["rssi"], "the pad advertised without a signal strength")
 
     def test_full_flow(self):
         asyncio.run(self.flow())

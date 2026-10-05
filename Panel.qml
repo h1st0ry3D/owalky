@@ -30,6 +30,7 @@ Panel {
     readonly property int pollInterval: 1500
     readonly property int outputLimit: 4096
     readonly property int macLength: 17
+    readonly property int scanLimit: 8
 
     property string mac: ""
     property string macInput: ""
@@ -56,6 +57,13 @@ Panel {
     // The panel does not assume the outcome: it waits for the daemon to report.
     property string pending: ""
     property bool daemonSeen: false
+    // The pads a scan found, each {mac, name, rssi}. Empty until the user scans.
+    property var foundPads: []
+    property bool scanning: false
+    property string scanMessage: ""
+    // Where in the dot count's cycle the hero line is, indexing ``dotCounts``.
+    property int dotsPhase: 0
+    readonly property bool waiting: root.scanning || root.pending !== ""
 
     // A 1.5s poll, and the config write that rides along with an action, must not
     // disable the controls. Only a belt command does.
@@ -146,10 +154,85 @@ Panel {
         send([name])
     }
 
+    // A scan is its own long-lived call, so it must not share the belt command's
+    // process: an eleven-second Bluetooth scan would disable the controls and
+    // delay a Stop for as long as it ran.
+    function scanForPads() {
+        // A live daemon owns the adapter for as long as it is alive, even while it
+        // has not connected yet, so a scan would fight it rather than help.
+        if (scanProcess.running || root.daemon) return
+        root.scanning = true
+        root.scanMessage = "Listening for pads …"
+        run(scanProcess, root.localCommand("scan"))
+        scanWatchdog.restart()
+    }
+
+    // Only the three fields the panel drew from the document are taken, and each
+    // is validated here, so a padded document cannot push a row the user cannot
+    // read or an address that is not one.
+    function adoptScan(document) {
+        if (!document || typeof document !== "object") return []
+        var devices = document.devices
+        if (!(devices instanceof Array)) return []
+        // A pad advertises repeatedly, so one address can arrive more than once. The
+        // rows are keyed by address rather than appended, so a pad is listed once
+        // even if the helper's own merge is bypassed.
+        var rows = {}
+        var listed = 0
+        for (var index = 0; index < devices.length && listed < root.scanLimit; index++) {
+            var device = devices[index]
+            if (!device || typeof device !== "object") continue
+            var address = String(device.mac === undefined ? "" : device.mac).trim().toUpperCase()
+            if (!root.validMac(address)) continue
+            var sighting = {
+                mac: address,
+                name: root.plain(device.name, 32),
+                // A pad without a reported strength sorts last, same as in the
+                // helper, so the nearest one stays on top.
+                rssi: isFinite(Number(device.rssi)) ? Number(device.rssi) : -999
+            }
+            var known = rows[address]
+            if (known === undefined) {
+                rows[address] = sighting
+                listed++
+                continue
+            }
+            if (sighting.rssi > known.rssi) known.rssi = sighting.rssi
+            if (sighting.name !== "") known.name = sighting.name
+        }
+        var pads = Object.keys(rows).map(function(address) { return rows[address] })
+        pads.sort(function(a, b) { return b.rssi - a.rssi || (a.mac < b.mac ? -1 : 1) })
+        return pads
+    }
+
+    function padLabel(pad) {
+        var strength = pad.rssi > -999 ? "  " + pad.rssi.toFixed(0) + " dBm" : ""
+        return pad.name + "  " + pad.mac + strength
+    }
+
+    // Selecting a pad is the same as typing its address: it is validated, stored,
+    // and the Connect button then acts on it. Nothing connects behind the user's
+    // back, so a mis-tap cannot start a belt.
+    function selectPad(pad) {
+        if (!root.validMac(pad.mac)) {
+            root.commandError = "That is not a BLE MAC address"
+            return
+        }
+        root.mac = pad.mac
+        root.macInput = pad.mac
+        root.foundPads = []
+        root.scanMessage = "Selected " + pad.name + " - press Connect"
+        root.saveConfig()
+    }
+
     function startLinkChange(name) {
         root.pending = name
         root.daemonSeen = false
         root.commandError = ""
+        // A scan result is only a way to choose an address, so it goes away once
+        // the link starts changing.
+        root.foundPads = []
+        root.scanMessage = ""
         send([name])
         stateTimer.restart()
     }
@@ -229,11 +312,36 @@ Panel {
         settlePending(document)
     }
 
+    /*
+     * A growing ellipsis, so a wait that lasts several seconds reads as progress
+     * rather than as a panel that has stopped.
+     *
+     * One, two, three, then back to one. The lap wraps on a two-dot step, which
+     * is the visible jump; an earlier version eased back down through two dots
+     * to avoid it, but the plain cycle is what was asked for and it reads as a
+     * steady beat rather than a wobble.
+     *
+     * The label does get wider as it grows, and nothing else moves with it: the
+     * hero line is left-aligned inside a column of fixed width and the panel's
+     * own width is a constant, so the word stays where it is and only the dots
+     * extend to its right. That was measured, not assumed.
+     */
+    readonly property var dotCounts: [1, 2, 3]
+
+    function dots() {
+        return ".".repeat(root.dotCounts[root.dotsPhase])
+    }
+
+    function waitingFor(label) {
+        return label + " " + root.dots()
+    }
+
     function statusLabel() {
         if (root.errorText) return root.errorText
         if (root.commandError) return root.plain(root.commandError, 80)
-        if (root.pending === "connect") return "Connecting …"
-        if (root.pending === "disconnect") return "Disconnecting …"
+        if (root.scanning) return root.waitingFor("Scanning")
+        if (root.pending === "connect") return root.waitingFor("Connecting")
+        if (root.pending === "disconnect") return root.waitingFor("Disconnecting")
         if (!root.mac) return "Set MAC to connect"
         if (root.paused) return "Paused"
         if (root.running) return "Running " + root.liveSpeed.toFixed(1) + " km/h"
@@ -318,6 +426,64 @@ Panel {
         }
     }
 
+    // A successful scan prints one JSON line and, when it found nothing, a line
+    // saying so for the command line. Only the document is shown here: the line
+    // beside it already says to power-cycle the pad, and saying it twice reads
+    // as two problems. A failed scan is the other way round, since there the
+    // helper's own wording is the only thing the user can act on.
+    function readScan(output, code) {
+        // Split before stripping: plain() drops control characters, a newline
+        // among them, so stripping first would weld the lines together.
+        var lines = String(output === undefined || output === null ? "" : output).split("\n")
+        for (var index = 0; index < lines.length; index++)
+            lines[index] = root.plain(lines[index].trim(), 400)
+        var document = null
+        try { document = JSON.parse(lines[0]) } catch (error) { document = null }
+        var parsed = document && typeof document === "object"
+        var pads = code === 0 && parsed ? root.adoptScan(document) : []
+        if (pads.length > 0)
+            return { pads: pads, message: pads.length + (pads.length === 1 ? " pad found" : " pads found") }
+        if (code !== 0) return { pads: [], message: lines.join(" ").trim() || "the scan failed" }
+        // A success that printed no readable document is not an empty scan, it is
+        // output this cannot use.
+        if (!parsed) return { pads: [], message: "the scan printed nothing usable" }
+        return { pads: [], message: "no pad is advertising" }
+    }
+
+    // One scan, one JSON document, then the process is gone. It is killed with
+    // the others when the panel closes, so a scan cannot outlive it and leave the
+    // Bluetooth adapter busy.
+    Process {
+        id: scanProcess
+        running: false
+        property string buffer: ""
+        stdout: SplitParser {
+            splitMarker: ""
+            onRead: function(chunk) { scanProcess.collect(chunk) }
+        }
+        stderr: SplitParser {
+            splitMarker: ""
+            onRead: function(chunk) { scanProcess.collect(chunk) }
+        }
+        environment: root.helperEnvironment
+        clearEnvironment: true
+        function collect(chunk) {
+            buffer += chunk
+            if (buffer.length > root.outputLimit) {
+                buffer = ""
+                signal(15)
+                scanKillTimer.start()
+            }
+        }
+        onExited: function(code) {
+            root.scanning = false
+            var result = readScan(buffer, code)
+            buffer = ""
+            root.foundPads = result.pads
+            root.scanMessage = result.message
+        }
+    }
+
     Process {
         id: configProcess
         running: false
@@ -362,6 +528,30 @@ Panel {
 
     Timer { id: statusKillTimer; interval: 2000; onTriggered: statusPoll.signal(9) }
     Timer { id: commandKillTimer; interval: 2000; onTriggered: commandProcess.signal(9) }
+    Timer { id: scanKillTimer; interval: 2000; onTriggered: scanProcess.signal(9) }
+
+    // A scan is capped at 30 seconds by the helper. This is the backstop for the
+    // case where the call does not come back at all, which a Bluetooth stack can
+    // do when the adapter is being switched underneath it.
+    Timer {
+        id: scanWatchdog
+        interval: 45000
+        onTriggered: if (scanProcess.running) scanProcess.signal(15)
+    }
+
+    // Drives the moving ellipsis in the hero line. It only runs while something
+    // is actually waiting, so an idle panel is not repainting four times a
+    // second for nothing, and it resets the phase so each wait starts at one dot.
+    Timer {
+        id: dotsTimer
+        interval: 380
+        repeat: true
+        running: root.waiting
+        triggeredOnStart: false
+        onTriggered: root.dotsPhase = (root.dotsPhase + 1) % root.dotCounts.length
+    }
+
+    onWaitingChanged: if (!root.waiting) root.dotsPhase = 0
 
     Timer {
         id: stateTimer
@@ -389,6 +579,7 @@ Panel {
         if (commandProcess.running) commandProcess.signal(15)
         if (statusPoll.running) statusPoll.signal(15)
         if (configProcess.running) configProcess.signal(15)
+        if (scanProcess.running) scanProcess.signal(15)
     }
 
     // -- bar button
@@ -398,8 +589,9 @@ Panel {
         bar: root.bar
         // fa-person_walking rather than a running figure: the pad is walked on.
         text: ""
-        // The shell sizes every bar icon from one token (Style.bar.iconFont,
-        // 13px by default); one step up still clears the 27px slot.
+        // The shell sizes every bar icon from one token (Style.bar.iconFont, 13px
+        // by default) and offers no per-widget override, so a single glyph cannot
+        // opt out on its own. Ask for one step up only: the 27px slot still holds it.
         fontSize: Style.bar.iconFont + 2
         onPressed: function(pressed) {
             if (pressed === Qt.RightButton) root.sendBelt("stop")
@@ -459,6 +651,7 @@ Panel {
                     bottomPadding: Style.space(12)
 
                     PanelHero {
+                        id: hero
                         width: parent.width
                         title: "Owalky"
                         // The shell renders this itself, so strip and cap first.
@@ -467,14 +660,13 @@ Panel {
                         fontFamily: Style.font.family
                         iconComponent: Component {
                             Text {
+                                // The same mark as the bar button, at hero size.
                                 text: ""
                                 textFormat: Text.PlainText
-                                color: Color.foreground
-                                font.family: Style.font.family
+                                color: hero.foreground
+                                font.family: hero.fontFamily
                                 // One step up from display, still inside the hero row.
                                 font.pixelSize: Style.font.displayLarge
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment: Text.AlignVCenter
                             }
                         }
                     }
@@ -498,7 +690,8 @@ Panel {
                             spacing: Style.space(8)
 
                             TextField {
-                                width: parent.width - connectButton.width - Style.space(8)
+                                width: parent.width - connectButton.width - scanButton.width
+                                    - Style.space(16)
                                 placeholderText: "AA:BB:CC:DD:EE:FF"
                                 // the address grammar is 17 characters
                                 maximumLength: root.macLength
@@ -522,6 +715,40 @@ Panel {
                                     root.startLinkChange(root.connected ? "disconnect" : "connect")
                                 }
                             }
+
+                            // Disabled whenever a daemon is alive: it holds the adapter even while it
+                            // is still looking for the pad.
+                            Button {
+                                id: scanButton
+                                text: "Scan"
+                                enabled: !root.busy && root.pending === "" && !root.daemon
+                                onClicked: root.scanForPads()
+                            }
+                        }
+
+                        // One row carries the scan's progress and its outcome, so the panel neither
+                        // grows nor jumps when the scan finishes. The spinner takes
+                        // its space only while it is showing.
+                        Row {
+                            width: parent.width
+                            visible: root.scanning || root.scanMessage !== ""
+                            spacing: Style.space(8)
+
+                            BusyIndicator {
+                                running: root.scanning
+                                implicitWidth: 11
+                                implicitHeight: 11
+                            }
+
+                            Text {
+                                width: parent.width - (root.scanning ? 19 : 0)
+                                text: root.plain(root.scanMessage, 80)
+                                textFormat: Text.PlainText
+                                color: Util.alpha(Color.foreground, 0.7)
+                                font.family: Style.font.family
+                                font.pixelSize: 9
+                                wrapMode: Text.WordWrap
+                            }
                         }
 
                         Row {
@@ -544,6 +771,28 @@ Panel {
                                 font.family: Style.font.family
                                 font.pixelSize: 9
                                 wrapMode: Text.WordWrap
+                            }
+                        }
+
+                        // The pads the scan found, nearest first. Each row is the whole selection:
+                        // pressing one fills the address field and stores it, and
+                        // the Connect button beside it acts on it from there.
+                        Column {
+                            width: parent.width
+                            spacing: Style.space(4)
+                            visible: root.foundPads.length > 0
+
+                            Repeater {
+                                model: root.foundPads
+
+                                Button {
+                                    id: padRow
+                                    required property var modelData
+                                    width: parent.width
+                                    text: root.padLabel(padRow.modelData)
+                                    enabled: !root.busy && root.pending === "" && !root.daemon
+                                    onClicked: root.selectPad(padRow.modelData)
+                                }
                             }
                         }
 
@@ -696,7 +945,7 @@ Panel {
                         Button {
                             visible: root.pending === "" && root.connected && !root.running
                             width: parent.width
-                            text: "Start"
+                            text: "Start Treadmill"
                             enabled: !root.busy
                             onClicked: { root.saveConfig(); root.sendBelt("start") }
                         }

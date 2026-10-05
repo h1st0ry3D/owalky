@@ -44,12 +44,13 @@ before it can do anything.
 ## Set up
 
 1. Power-cycle the pad. It only advertises for about 30 seconds after power-on.
-2. Find its MAC address, with any of:
+2. Open the panel, press **Scan**, and pick your pad from the list. It fills
+   **BLE MAC address** for you. Or type the address in yourself, with any of:
+   - `python3 -I owalky_helper.py scan`
    - `bluetoothctl devices | grep -i mobvoi`
    - LightBlue on iOS, or `nRF Connect` on Android
    - `bluetoothctl info <device>` while the vendor app is connected
-3. Open the panel and type the address into **BLE MAC address**, then press
-   **Connect**. It is saved to `~/.config/owalky/config.json`.
+3. Press **Connect**. The address is saved to `~/.config/owalky/config.json`.
 
 The address is validated as a full BLE MAC before it is used, so it can never be
 interpreted as anything but an address.
@@ -67,10 +68,16 @@ interpreted as anything but an address.
   which mode it is in, so the button in the panel is the source of truth, and the
   choice is remembered. Dropping from run to walk lowers the speed if it is over
   the new limit.
+- **Scan** listens for about 10 seconds and lists the pads that advertise the
+  Bluetooth **Fitness Machine Service**, nearest first. Only FTMS devices are
+  offered, so a heart rate strap or a speaker is never in the list. Press one and
+  its address goes into the field above; **Connect** then acts on that address. A
+  scan stores nothing by itself and never connects on its own. The pad
+  advertises for about 30 seconds after power-on, so power-cycle it first.
 - **Connect** starts a background daemon that claims the pad. It survives a shell
   reload, so the bar keeps working after `omarchy-shell` restarts.
-- **Start**, **Pause**, **Resume** and **Stop** act on the belt. **Stop** leaves the
-  connection open, so **Start** is immediate; **Disconnect** closes it.
+- **Start Treadmill**, **Pause**, **Resume** and **Stop** act on the belt. **Stop** leaves the
+  connection open, so **Start Treadmill** is immediate; **Disconnect** closes it.
 - The slider picks a target speed between 1.0 and 12.0 km/h in half-kilometre steps,
   with a numbered scale underneath so a value like 3.0 can be aimed at directly. The
   step buttons move it by 0.1 or 0.5, and the mouse wheel works over the slider. The
@@ -87,6 +94,8 @@ The helper is usable on its own, which is handy when the shell is not running:
 
 ```bash
 python3 -I owalky_helper.py status                     # one line of JSON
+python3 -I owalky_helper.py scan                       # pads advertising FTMS, as JSON
+python3 -I owalky_helper.py scan 20                    # listen for 20 seconds
 python3 -I owalky_helper.py --mac AA:BB:CC:DD:EE:FF connect
 python3 -I owalky_helper.py --mac AA:BB:CC:DD:EE:FF speed 3.5
 echo '{"mode":"run"}' | python3 -I owalky_helper.py config-set   # lift the 6.0 cap
@@ -155,6 +164,7 @@ and the control socket. They need nothing but the standard library.
 ```
 owalky_helper.py     the only executable: sets up sys.path and calls the CLI
 owalky/ftms.py       the FTMS codec, pure functions, no I/O
+owalky/scan.py       finding pads by the service they advertise
 owalky/storage.py    directory chains, bounded reads, atomic writes, the log
 owalky/state.py      state.json, config.json, MAC resolution
 owalky/identity.py   /proc identity, so a pid is never trusted bare
