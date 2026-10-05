@@ -396,7 +396,11 @@ Panel {
         id: button
         anchors.fill: parent
         bar: root.bar
-        text: "󰑮"
+        // fa-person_walking rather than a running figure: the pad is walked on.
+        text: ""
+        // The shell sizes every bar icon from one token (Style.bar.iconFont,
+        // 13px by default); one step up still clears the 27px slot.
+        fontSize: Style.bar.iconFont + 2
         onPressed: function(pressed) {
             if (pressed === Qt.RightButton) root.sendBelt("stop")
             else root.toggle()
@@ -463,11 +467,12 @@ Panel {
                         fontFamily: Style.font.family
                         iconComponent: Component {
                             Text {
-                                text: "󰑮"
+                                text: ""
                                 textFormat: Text.PlainText
                                 color: Color.foreground
                                 font.family: Style.font.family
-                                font.pixelSize: Style.font.display
+                                // One step up from display, still inside the hero row.
+                                font.pixelSize: Style.font.displayLarge
                                 horizontalAlignment: Text.AlignHCenter
                                 verticalAlignment: Text.AlignVCenter
                             }
