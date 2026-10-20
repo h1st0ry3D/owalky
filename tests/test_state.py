@@ -34,10 +34,27 @@ class TempHomeTest(unittest.TestCase):
 class CleanStateTests(unittest.TestCase):
     def test_known_fields_survive_with_their_types(self):
         cleaned = state.clean_state(
-            {"connected": True, "running": False, "paused": True, "speed": 3.5, "distance": 1200}
+            {
+                "connected": True,
+                "running": False,
+                "paused": True,
+                "speed": 3.5,
+                "distance": 1200,
+                "sessionActive": True,
+                "sessionDistance": 450,
+            }
         )
         self.assertEqual(
-            cleaned, {"connected": True, "running": False, "paused": True, "speed": 3.5, "distance": 1200}
+            cleaned,
+            {
+                "connected": True,
+                "running": False,
+                "paused": True,
+                "speed": 3.5,
+                "distance": 1200,
+                "sessionActive": True,
+                "sessionDistance": 450,
+            },
         )
 
     def test_absent_fields_stay_absent(self):
@@ -70,6 +87,17 @@ class CleanStateTests(unittest.TestCase):
     def test_booleans_are_not_accepted_as_numbers(self):
         self.assertNotIn("distance", state.clean_state({"distance": True}))
         self.assertNotIn("speed", state.clean_state({"speed": False}))
+
+    def test_the_workout_fields_are_validated_like_the_rest(self):
+        cleaned = state.clean_state({"sessionActive": "yes", "sessionDistance": 12.5})
+        self.assertEqual(cleaned, {})
+        self.assertEqual(
+            state.clean_state({"sessionActive": True, "sessionDistance": 900}),
+            {"sessionActive": True, "sessionDistance": 900},
+        )
+        for value in (-1, 10**9, True):
+            with self.subTest(value=value):
+                self.assertNotIn("sessionDistance", state.clean_state({"sessionDistance": value}))
 
     def test_error_strings_are_capped(self):
         cleaned = state.clean_state({"error": "x" * 1000})
@@ -240,6 +268,8 @@ class StatusDocumentTests(TempHomeTest):
                 "mode",
                 "paused",
                 "running",
+                "sessionActive",
+                "sessionDistance",
                 "speed",
             ],
         )
@@ -252,6 +282,8 @@ class StatusDocumentTests(TempHomeTest):
         self.assertFalse(document["connected"])
         self.assertFalse(document["running"])
         self.assertFalse(document["paused"])
+        self.assertFalse(document["sessionActive"])
+        self.assertEqual(document["sessionDistance"], 0)
 
 
 if __name__ == "__main__":

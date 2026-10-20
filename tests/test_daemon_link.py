@@ -16,6 +16,7 @@ import unittest
 from unittest import mock
 
 from owalky import daemon as daemon_module
+from owalky.activity import MIN_SESSION_METERS, load_activity
 from owalky.cli import clear_connection_state, spawn_daemon
 from owalky.daemon import MEASUREMENT_TIMEOUT_SECONDS, PadDaemon
 from owalky.identity import write_record
@@ -232,6 +233,95 @@ class ShutdownOrderTests(unittest.TestCase):
                 and os.unlink(os.path.join(state_path(), SOCKET_FILE))
             )
         )
+
+
+def distance_payload(meters: int) -> bytearray:
+    """One Treadmill Data notification carrying only the distance field."""
+    return bytearray(bytes((0x04, 0x00)) + meters.to_bytes(3, "little"))
+
+
+class SessionTrackingTests(unittest.TestCase):
+    """The workout distance is the daemon's, not the panel's.
+
+    A shell reload loses every property in Panel.qml, so recording the session
+    there would make it disappear. The daemon holds the baseline and writes the
+    history when the belt stops.
+    """
+
+    def setUp(self):
+        self._home = tempfile.TemporaryDirectory()
+        self.addCleanup(self._home.cleanup)
+        patch = mock.patch("owalky.storage.home_dir", return_value=self._home.name)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def measured_daemon(self) -> PadDaemon:
+        instance = PadDaemon(MAC)
+        # The odometer is read before the workout, so Start has a real baseline.
+        instance._on_measurement(None, distance_payload(1000))
+        return instance
+
+    def history(self) -> dict:
+        with state_dir() as dir_fd:
+            return load_activity(dir_fd)
+
+    def test_a_workout_records_the_delta_from_start(self):
+        instance = self.measured_daemon()
+        instance._begin_session()
+        instance._on_measurement(None, distance_payload(1400))
+        self.assertEqual(instance.session_distance_m, 400)
+        self.assertEqual(instance._finish_session(), 400)
+        document = self.history()
+        self.assertEqual(document["trainingDays"], 1)
+        self.assertEqual(document["history"][-1]["meters"], 400)
+
+    def test_finishing_twice_does_not_record_twice(self):
+        instance = self.measured_daemon()
+        instance._begin_session()
+        instance._on_measurement(None, distance_payload(1600))
+        self.assertEqual(instance._finish_session(), 600)
+        self.assertEqual(instance._finish_session(), 0)
+        self.assertEqual(self.history()["trainingDays"], 1)
+
+    def test_a_short_workout_is_not_recorded(self):
+        instance = self.measured_daemon()
+        instance._begin_session()
+        instance._on_measurement(None, distance_payload(1000 + MIN_SESSION_METERS - 1))
+        self.assertEqual(instance._finish_session(), 0)
+        self.assertEqual(self.history()["history"], [])
+
+    def test_an_odometer_reset_keeps_the_metres_already_covered(self):
+        instance = self.measured_daemon()
+        instance._begin_session()
+        instance._on_measurement(None, distance_payload(1300))
+        instance._on_measurement(None, distance_payload(50))     # pad reset to zero
+        self.assertEqual(instance.session_distance_m, 300)
+        instance._on_measurement(None, distance_payload(250))
+        self.assertEqual(instance.session_distance_m, 500)
+
+    def test_the_published_state_carries_the_workout_distance(self):
+        instance = self.measured_daemon()
+        instance._begin_session()
+        instance.publish(
+            running=True,
+            paused=False,
+            sessionActive=True,
+            sessionDistance=instance.session_distance_m,
+        )
+        instance._published_at = 0.0       # past the measurement write interval
+        instance._on_measurement(None, distance_payload(1750))
+        with state_dir() as dir_fd:
+            document = load_state(dir_fd)
+        self.assertIs(document.get("sessionActive"), True)
+        self.assertEqual(document.get("sessionDistance"), 750)
+
+    def test_a_start_without_a_reading_takes_the_first_notification_as_baseline(self):
+        instance = PadDaemon(MAC)
+        instance._begin_session()
+        instance._on_measurement(None, distance_payload(5000))
+        self.assertEqual(instance.session_distance_m, 0)
+        instance._on_measurement(None, distance_payload(5200))
+        self.assertEqual(instance.session_distance_m, 200)
 
 
 class ConstantTests(unittest.TestCase):

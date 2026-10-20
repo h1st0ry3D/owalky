@@ -24,6 +24,7 @@ import socket
 import struct
 import time
 
+from .activity import MIN_SESSION_METERS, record_session
 from .ftms import (
     CONTROL_POINT_UUID,
     DEFAULT_MODE,
@@ -40,7 +41,7 @@ from .ftms import (
 from .identity import write_record
 from .ipc import MAX_COMMAND_BYTES, MAX_REPLY_BYTES
 from .state import clean_state, load_config, load_state, save_state
-from .storage import PID_FILE, SOCKET_FILE, log_append, remove_file, state_dir, state_path
+from .storage import PID_FILE, SOCKET_FILE, StorageError, log_append, remove_file, state_dir, state_path
 
 SCAN_ATTEMPTS = 20
 SCAN_TIMEOUT = 1.0
@@ -66,6 +67,15 @@ class PadDaemon:
         self.speed_kmh: float | None = None
         self.speed_payload: bytes | None = None
         self.distance_m = 0
+        #: Set on the first distance notification, so a start command can tell a
+        #: known odometer from one the daemon has never read.
+        self._distance_seen = False
+        #: The workout, from Start until the belt stops. ``session_start_m`` is
+        #: the odometer reading the session is measured from; it is rebound when
+        #: the pad resets its odometer mid-session.
+        self.session_active = False
+        self.session_start_m: int | None = None
+        self.session_distance_m = 0
         self.closing = False
         self._published_at = 0.0
         self._last_measurement = 0.0
@@ -168,9 +178,63 @@ class PadDaemon:
         if sample.speed_kmh is not None:
             updates["speed"] = sample.speed_kmh
         if sample.distance_m is not None:
+            self._distance_seen = True
             self.distance_m = sample.distance_m
             updates["distance"] = sample.distance_m
+            if self.session_active:
+                self._update_session(sample.distance_m)
+                updates["sessionDistance"] = self.session_distance_m
         self.publish(min_interval=PUBLISH_INTERVAL_SECONDS, **updates)
+
+    # -- the workout in progress
+    def _begin_session(self) -> None:
+        """Start measuring a workout, without resetting one already in progress."""
+        if self.session_active:
+            return
+        self.session_active = True
+        self.session_distance_m = 0
+        # A fresh daemon has not read the pad's odometer yet. Taking the current
+        # value as the baseline would then count whatever the pad last reported
+        # as this workout, so the first notification after Start sets it instead.
+        self.session_start_m = self.distance_m if self._distance_seen else None
+
+    def _update_session(self, distance_m: int) -> None:
+        """Fold one odometer reading into the workout distance.
+
+        The pad may reset its odometer while the belt is running. A reading below
+        the baseline is treated as that reset, not as negative distance: the
+        baseline moves back so the metres already covered are kept.
+        """
+        if self.session_start_m is None:
+            self.session_start_m = distance_m
+        elif distance_m < self.session_start_m:
+            self.session_start_m = distance_m - self.session_distance_m
+        self.session_distance_m = max(0, distance_m - self.session_start_m)
+
+    def _finish_session(self) -> int:
+        """Record the workout, and return the metres it covered.
+
+        Called for Stop, Disconnect, a dropped link and shutdown, so a workout is
+        not lost because the panel closed or the pad was switched off. It is
+        idempotent: the state is cleared before the write, and a later call sees
+        no session.
+        """
+        if not self.session_active:
+            return 0
+        meters = self.session_distance_m
+        self.session_active = False
+        self.session_start_m = None
+        self.session_distance_m = 0
+        if meters < MIN_SESSION_METERS:
+            return 0
+        try:
+            with state_dir() as dir_fd:
+                document = record_session(dir_fd, meters)
+                log_append(dir_fd, f"session recorded: {meters} m, {document['trainingDays']} total")
+        except (OSError, StorageError, ValueError) as exc:
+            self.log(f"session not recorded: {exc}")
+            return 0
+        return meters
 
     def ceiling(self) -> float:
         """The speed ceiling for the mode the user has selected."""
@@ -182,12 +246,18 @@ class PadDaemon:
         await self.client.write_gatt_char(CONTROL_POINT_UUID, payload, response=False)
 
     async def _stop_belt(self) -> None:
-        if self.client is None:
-            return
-        with contextlib.suppress(Exception):
-            await self._write_control(OP_STOP)
-            await asyncio.sleep(COMMAND_DELAY_SECONDS)
-        self.publish(running=False, paused=False, connected=False)
+        if self.client is not None:
+            with contextlib.suppress(Exception):
+                await self._write_control(OP_STOP)
+                await asyncio.sleep(COMMAND_DELAY_SECONDS)
+        self._finish_session()
+        self.publish(
+            running=False,
+            paused=False,
+            connected=False,
+            sessionActive=False,
+            sessionDistance=0,
+        )
 
     # -- commands
     async def command(self, line: str) -> str:
@@ -227,7 +297,14 @@ class PadDaemon:
         if name == "start":
             await self._write_control(OP_START_RESUME)
             await asyncio.sleep(COMMAND_DELAY_SECONDS)
-            self.publish(running=True, paused=False, speed=self.speed_kmh or 1.0)
+            self._begin_session()
+            self.publish(
+                running=True,
+                paused=False,
+                speed=self.speed_kmh or 1.0,
+                sessionActive=True,
+                sessionDistance=self.session_distance_m,
+            )
             self.log("started")
         elif name == "resume":
             await self._write_control(OP_REQUEST_CONTROL)
@@ -236,7 +313,13 @@ class PadDaemon:
                 await self._write_control(self.speed_payload)
                 await asyncio.sleep(COMMAND_DELAY_SECONDS)
             await self._write_control(OP_START_RESUME)
-            self.publish(running=True, paused=False)
+            self._begin_session()
+            self.publish(
+                running=True,
+                paused=False,
+                sessionActive=True,
+                sessionDistance=self.session_distance_m,
+            )
             self.log("resumed")
         elif name == "pause":
             await self._write_control(OP_PAUSE)
@@ -245,8 +328,15 @@ class PadDaemon:
         elif name == "stop":
             await self._write_control(OP_STOP)
             await asyncio.sleep(STOP_SETTLE_SECONDS)
-            self.publish(running=False, paused=False, distance=self.distance_m)
-            self.log("stopped, staying connected")
+            meters = self._finish_session()
+            self.publish(
+                running=False,
+                paused=False,
+                distance=self.distance_m,
+                sessionActive=False,
+                sessionDistance=0,
+            )
+            self.log(f"stopped, staying connected ({meters} m this session)")
         elif name == "speed":
             if not arguments:
                 raise ValueError("speed needs a value in km/h")
@@ -266,7 +356,14 @@ class PadDaemon:
             os.chmod(socket_file, 0o600)
             identity = write_record(dir_fd)
         self.log(f"daemon {identity[0]} listening on {socket_file}")
-        self.publish(connected=False, running=False, paused=False, error="")
+        self.publish(
+            connected=False,
+            running=False,
+            paused=False,
+            sessionActive=False,
+            sessionDistance=0,
+            error="",
+        )
         try:
             await self._open_link()
             await self._hold_link()
@@ -286,7 +383,17 @@ class PadDaemon:
             if reason is None:
                 continue
             self.log(reason)
-            self.publish(connected=False, running=False, error=reason)
+            meters = self._finish_session()
+            self.publish(
+                connected=False,
+                running=False,
+                paused=False,
+                sessionActive=False,
+                sessionDistance=0,
+                error=reason,
+            )
+            if meters:
+                self.log(f"link lost with {meters} m recorded")
             return
 
     def link_loss_reason(self) -> str | None:
@@ -338,7 +445,13 @@ class PadDaemon:
             self.client = None
         # The last word belongs to the shutdown, not to a notification that
         # arrived while the link was closing.
-        self.publish(connected=False, running=False, paused=False)
+        self.publish(
+            connected=False,
+            running=False,
+            paused=False,
+            sessionActive=False,
+            sessionDistance=0,
+        )
         server.close()
         with contextlib.suppress(Exception):
             await server.wait_closed()

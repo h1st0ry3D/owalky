@@ -50,7 +50,7 @@ def clean_state(raw: object) -> dict:
     if not isinstance(raw, dict):
         return {}
     state: dict = {}
-    for key in ("connected", "running", "paused"):
+    for key in ("connected", "running", "paused", "sessionActive"):
         if isinstance(raw.get(key), bool):
             state[key] = raw[key]
     speed = raw.get("speed")
@@ -64,6 +64,13 @@ def clean_state(raw: object) -> dict:
     distance = raw.get("distance")
     if isinstance(distance, int) and not isinstance(distance, bool) and 0 <= distance <= MAX_DISTANCE_M:
         state["distance"] = distance
+    session_distance = raw.get("sessionDistance")
+    if (
+        isinstance(session_distance, int)
+        and not isinstance(session_distance, bool)
+        and 0 <= session_distance <= MAX_DISTANCE_M
+    ):
+        state["sessionDistance"] = session_distance
     for key in ("error", "updated"):
         value = raw.get(key)
         if isinstance(value, str):
@@ -183,6 +190,8 @@ def status_document() -> dict:
         "paused": bool(alive and state.get("paused")),
         "speed": state.get("speed", config.get("lastSpeed", 1.0)),
         "distance": state.get("distance", 0),
+        "sessionActive": bool(alive and state.get("sessionActive")),
+        "sessionDistance": state.get("sessionDistance", 0) if alive else 0,
         "error": state.get("error", ""),
         "mac": config.get("mac", ""),
         "lastSpeed": config.get("lastSpeed", 1.0),

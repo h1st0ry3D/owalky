@@ -16,6 +16,7 @@ import sys
 import time
 
 from . import __version__
+from .activity import load_activity
 from .daemon import run_daemon
 from .ftms import DEFAULT_MODE, clamp_speed, max_speed_for
 from .identity import daemon_alive, stop_daemon
@@ -59,6 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"owalky {__version__}")
     subcommands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
     subcommands.add_parser("status", help="print one line of JSON for the panel")
+    subcommands.add_parser("activity", help="print the recorded sessions as one line of JSON")
     scan_parser = subcommands.add_parser("scan", help="find pads advertising the FTMS service")
     scan_parser.add_argument(
         "seconds",
@@ -90,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     handlers = {
         "status": command_status,
+        "activity": command_activity,
         "scan": command_scan,
         "connect": command_connect,
         "disconnect": command_disconnect,
@@ -108,6 +111,14 @@ def main(argv: list[str] | None = None) -> int:
 def command_status(_arguments: argparse.Namespace) -> int:
     """Print the panel's whole view of the plugin as one line of JSON."""
     print(json.dumps(status_document(), separators=(",", ":")))
+    return EXIT_OK
+
+
+def command_activity(_arguments: argparse.Namespace) -> int:
+    """Print the recorded sessions as one JSON line, empty document included."""
+    with state_dir() as dir_fd:
+        document = load_activity(dir_fd)
+    print(json.dumps(document, separators=(",", ":")))
     return EXIT_OK
 
 
@@ -282,7 +293,17 @@ def clear_connection_state(dir_fd: int) -> None:
     showing the last connection while the new daemon is still scanning for a pad
     that is powered off.
     """
-    save_state(dir_fd, {"connected": False, "running": False, "paused": False, "error": ""})
+    save_state(
+        dir_fd,
+        {
+            "connected": False,
+            "running": False,
+            "paused": False,
+            "sessionActive": False,
+            "sessionDistance": 0,
+            "error": "",
+        },
+    )
 
 
 def bluetoothctl_disconnect(mac: str) -> int:

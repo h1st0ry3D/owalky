@@ -27,13 +27,18 @@ STATE_DIR_NAME = "owalky"
 CONFIG_DIR_NAME = "owalky"
 
 STATE_FILE = "state.json"
+ACTIVITY_FILE = "activity.json"
 LOG_FILE = "owalky.log"
 PID_FILE = "daemon.pid"
 SOCKET_FILE = "daemon.sock"
 CONFIG_FILE = "config.json"
 
 MAX_STATE_BYTES = 64 * 1024
+MAX_ACTIVITY_BYTES = 64 * 1024
 MAX_CONFIG_BYTES = 8 * 1024
+#: The pad reports distance in metres, and this is the ceiling the documents
+#: accept. 10,000 km is far past any session, so it is only a sanity bound.
+MAX_METERS = 10_000_000
 MAX_LOG_BYTES = 256 * 1024
 MAX_LOG_KEEP_BYTES = 64 * 1024
 MAX_LOG_TAIL_BYTES = 8 * 1024

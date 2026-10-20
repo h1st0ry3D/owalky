@@ -3,6 +3,9 @@ import QtQuick.Controls
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "ui"
+import "core/Progression.js" as Progression
+import "core/Document.js" as Document
 
 /*
  * Owalky: a bar widget and panel for an FTMS walking pad.
@@ -29,6 +32,10 @@ Panel {
 
     readonly property int pollInterval: 1500
     readonly property int outputLimit: 4096
+    // The activity document can hold 400 sessions, so its read gets its own,
+    // larger ceiling. It is only fetched on open and after a session ends, never
+    // on the 1.5s status poll.
+    readonly property int activityLimit: 65536
     readonly property int macLength: 17
     readonly property int scanLimit: 8
 
@@ -48,6 +55,28 @@ Panel {
     property bool connected: false
     property bool running: false
     property bool paused: false
+    // The workout the daemon is measuring, and its distance so far. Both come
+    // from the daemon, so a shell reload does not restart the count.
+    property bool sessionActive: false
+    property int sessionDistance: 0
+
+    // -- activity tracker
+    property string lastTrainingDate: ""
+    property int trainingDays: 0
+    property var history: []
+    property string activityError: ""
+    // A double, not an int: Date.now() is epoch milliseconds and a QML int is
+    // 32-bit, so an int property would wrap it to a date in 1970.
+    property double nowMs: Date.now()
+    readonly property int daysSinceLast: Progression.daysSince(root.lastTrainingDate, root.nowMs)
+    readonly property bool everTrained: root.lastTrainingDate !== ""
+    readonly property int statusValue: root.everTrained
+        ? Progression.statusForDays(root.daysSinceLast) : Progression.ON_TRACK
+    readonly property int pageCount: Math.max(1, Math.ceil(root.history.length / Progression.PAGE_SIZE))
+    property int historyPage: 0
+    // Clamped where it is read, so a shrinking history cannot point the strip
+    // past the end.
+    readonly property int page: Math.max(0, Math.min(root.historyPage, root.pageCount - 1))
     property bool daemon: false
     property string errorText: ""
     // The last failed command, shown in the hero line until something works.
@@ -68,6 +97,12 @@ Panel {
     // A 1.5s poll, and the config write that rides along with an action, must not
     // disable the controls. Only a belt command does.
     property bool busy: commandProcess.running
+
+    // The label in the bar while the belt is in use: the workout's kilometres.
+    // Idle, the bar shows the day bubble instead.
+    readonly property string barLabel: root.running || root.paused
+        ? Progression.formatMeters(root.sessionDistance) : ""
+    readonly property bool barShowsDistance: root.barLabel !== ""
 
     // -- untrusted input
     /*
@@ -138,6 +173,29 @@ Panel {
         process.command = command
         process.running = true
     }
+
+    // The activity document is read on its own schedule: when the panel opens,
+    // when it starts, and after a workout ends. The status poll stays small.
+    function refreshActivity() {
+        if (activityPoll.running) {
+            activityPoll.queued = true
+            return
+        }
+        activityPoll.buffer = ""
+        activityPoll.command = root.localCommand("activity")
+        activityPoll.running = true
+    }
+
+    function applyActivity(document) {
+        root.lastTrainingDate = document.lastTrainingDate
+        root.trainingDays = document.trainingDays
+        root.history = document.history
+        root.historyPage = root.pageCount - 1     // land on the newest sessions
+        root.activityError = ""
+    }
+
+    function pagePrevious() { root.historyPage = root.page - 1 }
+    function pageNext() { root.historyPage = root.page + 1 }
 
     function send(command) {
         if (commandProcess.running) return
@@ -304,11 +362,22 @@ Panel {
             root.liveSpeed = Number(document.speed)
         if (document.distance !== undefined && isFinite(Number(document.distance)))
             root.distance = Number(document.distance)
+        root.sessionActive = document.sessionActive === true
+        if (root.sessionActive && document.sessionDistance !== undefined
+                && isFinite(Number(document.sessionDistance)))
+            root.sessionDistance = Math.max(0, Math.floor(Number(document.sessionDistance)))
+        else if (!root.sessionActive)
+            root.sessionDistance = 0
+        var wasRunning = root.running
         root.daemon = document.daemon === true
         root.connected = document.connected === true
         root.running = document.running === true
         root.paused = document.paused === true
         root.errorText = root.plain(document.error, 120)
+        // The daemon records the workout as it stops, including when the link
+        // dropped or another client sent the Stop. A running -> idle edge is the
+        // signal that the history may have grown.
+        if (wasRunning && !root.running) root.refreshActivity()
         settlePending(document)
     }
 
@@ -392,6 +461,53 @@ Panel {
         }
     }
 
+    // The activity document is larger than a status line and is read only when
+    // it can have changed. A read asked for while one is in flight is queued so
+    // the history is re-read after the write it was waiting for.
+    Process {
+        id: activityPoll
+        running: false
+        property string buffer: ""
+        property string failure: ""
+        property bool queued: false
+        stdout: SplitParser {
+            splitMarker: ""
+            onRead: function(chunk) { activityPoll.collect(chunk) }
+        }
+        stderr: SplitParser {
+            splitMarker: ""
+            onRead: function(chunk) {
+                if (activityPoll.failure.length <= 2048) activityPoll.failure += chunk
+            }
+        }
+        environment: root.helperEnvironment
+        clearEnvironment: true
+        function collect(chunk) {
+            buffer += chunk
+            if (buffer.length > root.activityLimit) {
+                buffer = ""
+                signal(15)
+                activityKillTimer.start()
+            }
+        }
+        onExited: function(code) {
+            if (code === 0 && buffer !== "") {
+                root.applyActivity(Document.parse(buffer, Progression))
+            } else if (code !== 0) {
+                // The helper's own wording is the only thing the user can act
+                // on; it is flattened here because the panel renders it as text.
+                root.activityError = root.plain(failure.trim(), 120)
+                    || "Could not read the activity file."
+            }
+            buffer = ""
+            failure = ""
+            if (activityPoll.queued) {
+                activityPoll.queued = false
+                activityPoll.running = true
+            }
+        }
+    }
+
     Process {
         id: commandProcess
         running: false
@@ -423,6 +539,10 @@ Panel {
                 root.daemonSeen = false
             }
             root.refresh()
+            // Start, Stop and Disconnect all change what the daemon is
+            // measuring; a failed command still costs one small read and
+            // cannot leave a stale history on screen.
+            root.refreshActivity()
         }
     }
 
@@ -529,6 +649,7 @@ Panel {
     Timer { id: statusKillTimer; interval: 2000; onTriggered: statusPoll.signal(9) }
     Timer { id: commandKillTimer; interval: 2000; onTriggered: commandProcess.signal(9) }
     Timer { id: scanKillTimer; interval: 2000; onTriggered: scanProcess.signal(9) }
+    Timer { id: activityKillTimer; interval: 4000; onTriggered: activityPoll.signal(9) }
 
     // A scan is capped at 30 seconds by the helper. This is the backstop for the
     // case where the call does not come back at all, which a Bluetooth stack can
@@ -569,9 +690,38 @@ Panel {
         onTriggered: root.refresh()
     }
 
-    onOpenedChanged: if (opened) root.refresh()
+    // The day bubble counts days, so it has to re-evaluate when the count
+    // changes rather than at the shell's start. This re-arms from the clock each
+    // tick, so a suspend or a clock change lands on the next boundary. The
+    // hourly tick keeps nowMs close to the wall clock for the bar readout.
+    Timer {
+        interval: 3600000
+        running: true
+        repeat: true
+        onTriggered: root.nowMs = Date.now()
+    }
 
-    Component.onCompleted: root.refresh()
+    Timer {
+        id: dayRollover
+        interval: Progression.msUntilNextDay(root.nowMs)
+        running: true
+        repeat: true
+        onTriggered: {
+            root.nowMs = Date.now()
+            dayRollover.interval = Progression.msUntilNextDay(root.nowMs)
+        }
+    }
+
+    onOpenedChanged: {
+        if (!opened) return
+        root.refresh()
+        root.refreshActivity()
+    }
+
+    Component.onCompleted: {
+        root.refresh()
+        root.refreshActivity()
+    }
 
     // Nothing started here may outlive the panel. The daemon is exempt: it holds
     // the BLE link across a shell reload.
@@ -580,19 +730,41 @@ Panel {
         if (statusPoll.running) statusPoll.signal(15)
         if (configProcess.running) configProcess.signal(15)
         if (scanProcess.running) scanProcess.signal(15)
+        if (activityPoll.running) activityPoll.signal(15)
     }
 
     // -- bar button
+    // The day bubble is the idle icon, as in the activity panel; while the belt
+    // is in use the slot carries the workout's kilometres instead. The status
+    // dot stays on top either way.
+    Component {
+        id: dayBubbleMark
+        DayBubble {
+            statusValue: root.statusValue
+            daysSinceLast: root.daysSinceLast
+            everTrained: root.everTrained
+            // A 20px disc derives a label at the 8px floor, which is too small
+            // to read at a glance in the bar, so the size is asked for here.
+            labelSize: 9
+            quietOnTrack: true
+        }
+    }
+
     BarIconButton {
         id: button
         anchors.fill: parent
         bar: root.bar
-        // fa-person_walking rather than a running figure: the pad is walked on.
-        text: ""
-        // The shell sizes every bar icon from one token (Style.bar.iconFont, 13px
-        // by default) and offers no per-widget override, so a single glyph cannot
-        // opt out on its own. Ask for one step up only: the 27px slot still holds it.
-        fontSize: Style.bar.iconFont + 2
+        // Four characters ("12.4") would not fit at the icon size, so the
+        // longer label steps down inside the same 27px slot. While idle the
+        // component above supplies the icon instead of this text.
+        text: root.barLabel
+        iconComponent: root.barShowsDistance ? null : dayBubbleMark
+        // The icon slot is a fixed box and its 16px default is too small for
+        // "12d" inside a disc.
+        opticalSize: 20
+        fontSize: root.barLabel.length > 3
+            ? Math.round(Style.bar.iconFont * 0.95)
+            : Math.round(Style.bar.iconFont * 1.15)
         onPressed: function(pressed) {
             if (pressed === Qt.RightButton) root.sendBelt("stop")
             else root.toggle()
@@ -628,13 +800,18 @@ Panel {
         open: root.opened
         focusTarget: keyCatcher
         contentWidth: dropdown.fittedContentWidth(Style.space(380))
-        contentHeight: dropdown.fittedContentHeight(col.implicitHeight, Style.space(580))
+        contentHeight: dropdown.fittedContentHeight(col.implicitHeight, Style.space(680))
 
         PanelKeyCatcher {
             id: keyCatcher
             anchors.fill: parent
             onCloseRequested: root.close()
             onTabRequested: function(direction) { root.switchPanel(direction) }
+            // Left and right page the activity strip; up and down are the shell's.
+            onMoveRequested: function(dx) {
+                if (dx < 0) root.pagePrevious()
+                else if (dx > 0) root.pageNext()
+            }
 
             Flickable {
                 anchors.fill: parent
@@ -658,15 +835,20 @@ Panel {
                         meta: root.plain(root.statusLabel(), 80)
                         foreground: Color.foreground
                         fontFamily: Style.font.family
+                        // The same day bubble as the bar's idle icon, so the
+                        // panel and the bar count the same days.
                         iconComponent: Component {
-                            Text {
-                                // The same mark as the bar button, at hero size.
-                                text: ""
-                                textFormat: Text.PlainText
-                                color: hero.foreground
-                                font.family: hero.fontFamily
-                                // One step up from display, still inside the hero row.
-                                font.pixelSize: Style.font.displayLarge
+                            DayBubble {
+                                statusValue: root.statusValue
+                                daysSinceLast: root.daysSinceLast
+                                everTrained: root.everTrained
+                                // The disc already carries the on-track/keep/drop
+                                // colour; the tooltip spells out which is which.
+                                tooltip: true
+                                // The hero's icon slot sizes the item from its
+                                // implicit size, so the size is asked for here.
+                                implicitWidth: Math.round(Style.font.display * 1.25)
+                                implicitHeight: Math.round(Style.font.display * 1.25)
                             }
                         }
                     }
@@ -826,7 +1008,19 @@ Panel {
                             font.family: Style.font.family
                             font.pixelSize: 28
                             font.bold: true
-        }
+                        }
+
+                        Text {
+                            width: parent.width
+                            horizontalAlignment: Text.AlignHCenter
+                            text: root.sessionActive
+                                ? "This session: " + Progression.metersLabel(root.sessionDistance)
+                                : "This session: waiting for the pad"
+                            textFormat: Text.PlainText
+                            color: Util.alpha(Color.foreground, 0.7)
+                            font.family: Style.font.family
+                            font.pixelSize: Style.font.bodySmall
+                        }
 
                         Row {
                             anchors.horizontalCenter: parent.horizontalCenter
@@ -985,6 +1179,23 @@ Panel {
                             font.pixelSize: Style.font.bodySmall
                             wrapMode: Text.WordWrap
                         }
+                    }
+
+                    PanelSeparator { foreground: Color.foreground }
+
+                    // One disc per workout, in the same shape as the pushup
+                    // tracker: the gap to the session before it sets the colour,
+                    // and the day bubble in the hero counts forward from the last
+                    // one. The treadmill controls above start and end a session.
+                    ProgressSection {
+                        width: parent.width
+                        history: root.history
+                        page: root.page
+                        pageCount: root.pageCount
+                        trainingDays: root.trainingDays
+                        activityError: root.activityError
+                        onPreviousPageRequested: root.pagePrevious()
+                        onNextPageRequested: root.pageNext()
                     }
                 }
             }

@@ -3,8 +3,9 @@
 ## Omarchy walking tracker and walkpad controller plugin
 
 Control an FTMS walking pad from the Omarchy bar: connect, start, pause, resume,
-stop and set the speed in 0.1 km/h steps, with a live speed readout and a debug log
-in the panel.
+stop and set the speed in 0.1 km/h steps, with a live speed readout and a recorded
+training history. Each workout logs the kilometres the pad reported, in the same
+circles-and-days form as the Opushy pushup tracker.
 
 Written for pads that speak Bluetooth LE Fitness Machine Service, and developed
 against a **Mobvoi Home Walking Pad** (the peripheral advertises itself as
@@ -63,11 +64,6 @@ interpreted as anything but an address.
   which mode it is in, so the button in the panel is the source of truth and the
   choice is remembered. Dropping from run to walk lowers the speed if it is over
   the new limit.
-- **Walk mode** caps the belt at 6.0 km/h, which is all the pad allows while the
-  handle bar is down. **Run mode** lifts the cap to 12.0. The pad does not report
-  which mode it is in, so the button in the panel is the source of truth, and the
-  choice is remembered. Dropping from run to walk lowers the speed if it is over
-  the new limit.
 - **Scan** listens for about 10 seconds and lists the pads that advertise the
   Bluetooth **Fitness Machine Service**, nearest first. Only FTMS devices are
   offered, so a heart rate strap or a speaker is never in the list. Press one and
@@ -78,15 +74,45 @@ interpreted as anything but an address.
   reload, so the bar keeps working after `omarchy-shell` restarts.
 - **Start Treadmill**, **Pause**, **Resume** and **Stop** act on the belt. **Stop** leaves the
   connection open, so **Start Treadmill** is immediate; **Disconnect** closes it.
+  Starting begins a workout and stopping records it; see **Activity**.
 - The slider picks a target speed between 1.0 and 12.0 km/h in half-kilometre steps,
   with a numbered scale underneath so a value like 3.0 can be aimed at directly. The
   step buttons move it by 0.1 or 0.5, and the mouse wheel works over the slider. The
   last speed is remembered.
-- The panel shows the live speed reported by the pad, the current state, and the
-  tail of the debug log.
+- The panel shows the live speed reported by the pad, the current state, the
+  workout distance, and the recorded activity below the controls.
 
-> The bar icon shows a green dot while the belt is running, amber while paused, and
-> blue while connected and idle.
+> While idle the bar carries the days-since-last-workout disc. While the belt runs
+> it carries the kilometres of the current workout. A green dot means running, amber
+> paused, and blue connected and idle.
+
+## Activity
+
+Every workout started with **Start Treadmill** is a session. The daemon measures its
+distance from the pad's own odometer, so a shell reload does not restart the count,
+and records it when the belt stops. **Stop**, **Disconnect**, a dropped Bluetooth
+link and daemon shutdown all record the session, so a powered-off pad does not lose
+the kilometres already walked. A session shorter than 10 metres is ignored.
+
+The panel shows the last workouts as green, amber and red discs, seven to a page.
+Each disc carries the kilometres of that session, and its colour is the gap to the
+session before it:
+
+| Colour | Meaning |
+|--------|---------|
+| green  | 2 days or less since the previous session |
+| amber  | exactly 3 days |
+| red    | 4 days or more |
+
+The bubble beside the panel's title, and the bar icon when the belt is idle, counts
+the days since the last recorded workout in the same colour. It shows `∞` before
+the first session. Use the arrows above the discs, or the left and right arrow keys,
+to page through them.
+
+The panel does not use a target or a progression rule: the pad is the coach, and
+the history only records what it reported. The last session, the best session and
+the total number of sessions are shown above the discs. To start a fresh chain,
+delete `~/.local/state/owalky/activity.json` while the daemon is not running.
 
 ### From the command line
 
@@ -94,11 +120,11 @@ The helper is usable on its own, which is handy when the shell is not running:
 
 ```bash
 python3 -I owalky_helper.py status                     # one line of JSON
+python3 -I owalky_helper.py activity                   # recorded workouts, one line of JSON
 python3 -I owalky_helper.py scan                       # pads advertising FTMS, as JSON
 python3 -I owalky_helper.py scan 20                    # listen for 20 seconds
 python3 -I owalky_helper.py --mac AA:BB:CC:DD:EE:FF connect
 python3 -I owalky_helper.py --mac AA:BB:CC:DD:EE:FF speed 3.5
-echo '{"mode":"run"}' | python3 -I owalky_helper.py config-set   # lift the 6.0 cap
 echo '{"mode":"run"}' | python3 -I owalky_helper.py config-set   # lift the 6.0 cap
 python3 -I owalky_helper.py log 40
 ```
@@ -109,20 +135,23 @@ python3 -I owalky_helper.py log 40
 
 ```
 omarchy-shell (Panel.qml)
-  └── owalky_helper.py status / speed / pause …      one bounded line each
+  └── owalky_helper.py status / activity / speed …   one bounded line each
         └── daemon.sock (0600, same-uid peers only)
-              └── owalky/daemon.py                   the BLE link
-                    └── owalky_ftms.py               the protocol codec
+              └── owalky/daemon.py                   the BLE link and the workout
+                    ├── owalky/ftms.py               the protocol codec
+                    └── owalky/activity.py           the recorded sessions
 ```
 
 The panel never speaks Bluetooth and never reads a file. It runs the helper as an
 argv array with an absolute interpreter and a cleared environment, and parses one
-small JSON document per call. The helper owns a background daemon that holds the BLE
+bounded JSON document per call. The helper owns a background daemon that holds the BLE
 link, because the pad only accepts control writes from a central that has claimed
 control, and reconnecting takes seconds.
 
 `running` and `paused` are tracked from the commands the panel sends, not from the
-pad's notifications: this pad keeps echoing an idle speed after it stops.
+pad's notifications: this pad keeps echoing an idle speed after it stops. The
+workout baseline and distance live in the daemon for the same reason: a panel
+reload must not change what is being measured.
 
 `docs/ftms.md` documents the opcodes, how to read them with LightBlue, and the
 quirks of this particular pad.
@@ -135,7 +164,8 @@ quirks of this particular pad.
   helper runs as your user with an absolute interpreter path and a fixed environment.
 - **Files written**, all `0600` inside `0700` directories:
   - `~/.config/owalky/config.json` — MAC address, last speed, walk/run mode
-  - `~/.local/state/owalky/state.json` — current state
+  - `~/.local/state/owalky/state.json` — current state and workout distance
+  - `~/.local/state/owalky/activity.json` — one entry per recorded workout, in metres
   - `~/.local/state/owalky/owalky.log` — debug log, rotated at 256 KiB
   - `~/.local/state/owalky/daemon.pid`, `daemon.sock` — daemon identity and socket
 - The MAC address is a device identifier. It stays on this machine, in the files
@@ -158,14 +188,16 @@ python3 -m unittest discover -s tests -t . -v      # same, directly
 ```
 
 The unit tests cover the protocol codec, the file layer against planted symlinks,
-fifos and oversized files, the state and configuration documents, process identity,
-and the control socket. They need nothing but the standard library.
+fifos and oversized files, the state, configuration and activity documents, the
+workout accounting in the daemon, process identity, and the control socket. They
+need nothing but the standard library.
 
 ```
 owalky_helper.py     the only executable: sets up sys.path and calls the CLI
 owalky/ftms.py       the FTMS codec, pure functions, no I/O
 owalky/scan.py       finding pads by the service they advertise
 owalky/storage.py    directory chains, bounded reads, atomic writes, the log
+owalky/activity.py   activity.json, the session document and its bounds
 owalky/state.py      state.json, config.json, MAC resolution
 owalky/identity.py   /proc identity, so a pid is never trusted bare
 owalky/ipc.py        the control-socket client
@@ -187,6 +219,7 @@ and the helper, and leaves behind:
 | `~/.config/owalky/config.json` | kept | your MAC address and last speed, in case you reinstall |
 | `~/.local/state/owalky/owalky.log` | kept | the debug log |
 | `~/.local/state/owalky/state.json` | kept | the last known state |
+| `~/.local/state/owalky/activity.json` | kept | your recorded workouts |
 | `~/.local/state/owalky/daemon.pid`, `daemon.sock` | removed when the daemon exits | |
 
 To delete those as well, remove the two directories:
