@@ -118,6 +118,9 @@ Panel {
     readonly property string barLabel: root.running || root.paused
         ? Progression.formatMeters(root.sessionDistance) : ""
     readonly property bool barShowsDistance: root.barLabel !== ""
+    // The MAC and link controls are setup, not workout UI. Hide them while a
+    // session is running, including the separator above them.
+    readonly property bool connectionAreaVisible: !root.running && !root.sessionActive
 
     // -- untrusted input
     /*
@@ -313,6 +316,7 @@ Panel {
 
     function setSpeed(value) {
         var speed = root.clampSpeed(value)
+        root.speedLoaded = true
         root.currentSpeed = speed
         root.liveSpeed = speed
         root.saveConfig()
@@ -876,10 +880,14 @@ Panel {
                         }
                     }
 
-                    PanelSeparator { foreground: Color.foreground }
+                    PanelSeparator {
+                        visible: root.connectionAreaVisible
+                        foreground: Color.foreground
+                    }
 
                     Column {
                         width: parent.width
+                        visible: root.connectionAreaVisible
                         spacing: Style.space(8)
 
                         Text {

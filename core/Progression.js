@@ -116,15 +116,17 @@ function historyValue(history, index) {
     return statusForDays(Math.floor((curr - prev) / MS_PER_DAY))
 }
 
-// A compact label for a 32px disc: 0.45, 2.4, 12.4, 123. It never grows past
-// four characters, so the text stays inside the circle.
+// A compact label for a 32px disc. It keeps three digits as the number grows:
+// 0.15, 1.50, 10.5, 105, then kilometres with a k suffix.
 function formatMeters(meters) {
     var value = Number(meters)
     if (!isFinite(value) || value <= 0) return "0"
     var km = value / 1000
-    if (km < 1) return km.toFixed(2)
-    if (km < 100) return km.toFixed(1)
-    return String(Math.round(km))
+    if (km < 9.995) return km.toFixed(2)
+    if (km < 99.95) return km.toFixed(1)
+    if (km < 999.5) return String(Math.round(km))
+    if (km < 9995) return (km / 1000).toFixed(1) + "k"
+    return String(Math.round(km / 1000)) + "k"
 }
 
 // The same number with its unit, for the summary line rather than a disc.

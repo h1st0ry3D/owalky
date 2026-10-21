@@ -80,6 +80,8 @@ interpreted as anything but an address.
   step buttons move it by 0.1 or 0.5, and the mouse wheel works over the slider. The
   last speed is remembered while stopped. Start uses 1.0 km/h because this pad
   ignores a speed sent with Start; raise it after the belt is running.
+- While a session runs, the panel hides the BLE address and Connect/Scan area so
+  the workout controls and session numbers get the space.
 - The panel shows the live speed reported by the pad, the current state, and the
   recorded activity. Below the treadmill controls, separated by a line, are the
   session's distance in km, its active time and the estimated calories.
@@ -98,7 +100,8 @@ the kilometres already walked.
 
 The panel shows the last workouts as green, amber and red discs, seven to a page.
 Each disc carries the kilometres of that session, and its colour is the gap to the
-session before it:
+session before it. The label keeps three digits as the distance grows: `0.15`,
+`1.50`, `10.5`, `105`, then `1.0k`.
 
 | Colour | Meaning |
 |--------|---------|
