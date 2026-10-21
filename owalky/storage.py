@@ -36,9 +36,10 @@ CONFIG_FILE = "config.json"
 MAX_STATE_BYTES = 64 * 1024
 MAX_ACTIVITY_BYTES = 64 * 1024
 MAX_CONFIG_BYTES = 8 * 1024
-#: The pad reports distance in metres, and this is the ceiling the documents
-#: accept. 10,000 km is far past any session, so it is only a sanity bound.
+#: Document limits shared by the state and activity documents.
 MAX_METERS = 10_000_000
+MAX_SESSION_SECONDS = 1_000_000
+MAX_CALORIES = 1_000_000
 MAX_LOG_BYTES = 256 * 1024
 MAX_LOG_KEEP_BYTES = 64 * 1024
 MAX_LOG_TAIL_BYTES = 8 * 1024

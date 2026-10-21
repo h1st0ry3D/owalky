@@ -89,15 +89,38 @@ class CleanStateTests(unittest.TestCase):
         self.assertNotIn("speed", state.clean_state({"speed": False}))
 
     def test_the_workout_fields_are_validated_like_the_rest(self):
-        cleaned = state.clean_state({"sessionActive": "yes", "sessionDistance": 12.5})
+        cleaned = state.clean_state(
+            {
+                "sessionActive": "yes",
+                "sessionDistance": 12.5,
+                "sessionElapsed": "600",
+                "sessionCalories": 1.5,
+                "sessionCaloriesEstimated": "no",
+            }
+        )
         self.assertEqual(cleaned, {})
         self.assertEqual(
-            state.clean_state({"sessionActive": True, "sessionDistance": 900}),
-            {"sessionActive": True, "sessionDistance": 900},
+            state.clean_state(
+                {
+                    "sessionActive": True,
+                    "sessionDistance": 900,
+                    "sessionElapsed": 600,
+                    "sessionCalories": 42,
+                    "sessionCaloriesEstimated": True,
+                }
+            ),
+            {
+                "sessionActive": True,
+                "sessionDistance": 900,
+                "sessionElapsed": 600,
+                "sessionCalories": 42,
+                "sessionCaloriesEstimated": True,
+            },
         )
-        for value in (-1, 10**9, True):
-            with self.subTest(value=value):
-                self.assertNotIn("sessionDistance", state.clean_state({"sessionDistance": value}))
+        for key in ("sessionDistance", "sessionElapsed", "sessionCalories"):
+            for value in (-1, 10**9, True):
+                with self.subTest(key=key, value=value):
+                    self.assertNotIn(key, state.clean_state({key: value}))
 
     def test_error_strings_are_capped(self):
         cleaned = state.clean_state({"error": "x" * 1000})
@@ -269,7 +292,10 @@ class StatusDocumentTests(TempHomeTest):
                 "paused",
                 "running",
                 "sessionActive",
+                "sessionCalories",
+                "sessionCaloriesEstimated",
                 "sessionDistance",
+                "sessionElapsed",
                 "speed",
             ],
         )

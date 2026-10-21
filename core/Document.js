@@ -9,6 +9,8 @@
 
 var MAX_METERS = 10000000
 var MAX_TRAINING_DAYS = 1000000
+var MAX_SESSION_SECONDS = 1000000
+var MAX_CALORIES = 1000000
 var HISTORY_MAX = 400
 
 function emptyDocument() {
@@ -40,7 +42,13 @@ function parseHistory(value, rules) {
         if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue
         var time = parseTimestamp(entry.time, rules)
         if (!time) continue
-        out.push({ time: time, meters: boundedInt(entry.meters, 0, MAX_METERS, 0) })
+        out.push({
+            time: time,
+            meters: boundedInt(entry.meters, 0, MAX_METERS, 0),
+            seconds: boundedInt(entry.seconds, 0, MAX_SESSION_SECONDS, 0),
+            calories: boundedInt(entry.calories, 0, MAX_CALORIES, 0),
+            estimated: entry.estimated === true
+        })
     }
     return out
 }
@@ -60,15 +68,4 @@ function parse(raw, rules) {
     doc.lastTrainingDate = parseTimestamp(parsed.lastTrainingDate, rules)
     doc.history = parseHistory(parsed.history, rules)
     return doc
-}
-
-// One line: the helper reads stdin as a single bounded line and re-indents the
-// file it writes.
-function serialize(doc, rules) {
-    var source = doc && typeof doc === "object" && !Array.isArray(doc) ? doc : emptyDocument()
-    return JSON.stringify({
-        lastTrainingDate: parseTimestamp(source.lastTrainingDate, rules),
-        trainingDays: boundedInt(source.trainingDays, 0, MAX_TRAINING_DAYS, 0),
-        history: Array.isArray(source.history) ? source.history.slice(-HISTORY_MAX) : []
-    })
 }

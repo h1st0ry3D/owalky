@@ -66,33 +66,74 @@ class MacGrammarTests(unittest.TestCase):
 
 
 class NotificationDecodingTests(unittest.TestCase):
-    def test_speed_only(self):
-        sample = ftms.TreadmillSample.decode(bytes.fromhex("01006400"))
+    def test_speed_is_present_when_flag_zero_is_clear(self):
+        # flags 0x0000: instantaneous speed at bytes 2-3, 1.00 km/h
+        sample = ftms.TreadmillSample.decode(bytes.fromhex("00006400"))
         self.assertEqual(sample.speed_kmh, 1.0)
         self.assertIsNone(sample.distance_m)
+        self.assertIsNone(sample.elapsed_s)
 
-    def test_distance_only(self):
-        sample = ftms.TreadmillSample.decode(bytes.fromhex("04002c0100"))
-        self.assertEqual(sample.distance_m, 300)
-        self.assertIsNone(sample.speed_kmh)
-
-    def test_stride_field_is_skipped(self):
-        # flags 0x0007: speed, stride, distance
-        payload = bytes.fromhex("0700640064002c0100")
-        sample = ftms.TreadmillSample.decode(payload)
+    def test_distance_comes_after_the_speed_field(self):
+        # flags 0x0004: speed then total distance (300 m)
+        sample = ftms.TreadmillSample.decode(bytes.fromhex("040064002c0100"))
         self.assertEqual(sample.speed_kmh, 1.0)
         self.assertEqual(sample.distance_m, 300)
 
-    def test_no_announced_fields(self):
-        sample = ftms.TreadmillSample.decode(bytes.fromhex("0000"))
-        self.assertEqual(sample.flags, 0)
+    def test_the_pad_idle_payload_is_read_at_the_spec_offsets(self):
+        # Captured from the Mobvoi pad: flags 0x2484, speed 3.24 km/h, the rest
+        # zero after the session was stopped. Bit 13 is reserved and carries
+        # three vendor bytes after the elapsed time.
+        sample = ftms.TreadmillSample.decode(
+            bytes.fromhex("8424440100000000000000000000000000")
+        )
+        self.assertEqual(sample.flags, 0x2484)
+        self.assertEqual(sample.speed_kmh, 3.24)
+        self.assertEqual(sample.distance_m, 0)
+        self.assertEqual(sample.energy_kcal, 0)
+        self.assertEqual(sample.elapsed_s, 0)
+
+    def test_energy_and_elapsed_time_are_decoded_when_announced(self):
+        # flags: distance, expended energy, elapsed time (0x0484)
+        # speed 3.00, distance 1200, energy 45 kcal, 200 kcal/h, 3 kcal/min,
+        # elapsed 600 s.
+        payload = bytes.fromhex("84042c01b004002d00c800035802")
+        sample = ftms.TreadmillSample.decode(payload)
+        self.assertEqual(sample.speed_kmh, 3.0)
+        self.assertEqual(sample.distance_m, 1200)
+        self.assertEqual(sample.energy_kcal, 45)
+        self.assertEqual(sample.elapsed_s, 600)
+
+    def test_the_pad_reserved_bit_and_vendor_tail_are_ignored(self):
+        # flags 0x2484: distance, energy, elapsed, plus the pad's reserved bit
+        # 13 and its three extra bytes.
+        payload = bytes.fromhex("84242c01b004002d00c800035802aabbcc")
+        sample = ftms.TreadmillSample.decode(payload)
+        self.assertEqual(sample.speed_kmh, 3.0)
+        self.assertEqual(sample.distance_m, 1200)
+        self.assertEqual(sample.energy_kcal, 45)
+        self.assertEqual(sample.elapsed_s, 600)
+
+    def test_more_data_without_speed_still_reads_distance(self):
+        # bit 0 set means no instantaneous speed; bit 2 means distance follows.
+        sample = ftms.TreadmillSample.decode(bytes.fromhex("05002c0100"))
+        self.assertIsNone(sample.speed_kmh)
+        self.assertEqual(sample.distance_m, 300)
+
+    def test_no_announced_fields_is_valid(self):
+        sample = ftms.TreadmillSample.decode(bytes.fromhex("0100"))
+        self.assertEqual(sample.flags, 1)
         self.assertIsNone(sample.speed_kmh)
         self.assertIsNone(sample.distance_m)
 
     def test_truncated_and_oversized_payloads_are_refused(self):
-        for payload in (b"", b"\x01", bytes.fromhex("0100"), bytes.fromhex("04002c01"), bytes(200)):
+        for payload in (b"", b"\x01", bytes.fromhex("04002c01"), bytes(200)):
             with self.subTest(payload=payload.hex()):
                 self.assertIsNone(ftms.TreadmillSample.decode(payload))
+
+    def test_an_announced_field_that_does_not_fit_is_refused(self):
+        # bits 0 and 2 clear/set: speed and distance are announced; only one
+        # speed byte follows.
+        self.assertIsNone(ftms.TreadmillSample.decode(bytes.fromhex("040064")))
 
 
 class OpcodeTests(unittest.TestCase):

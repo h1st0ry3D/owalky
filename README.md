@@ -4,8 +4,8 @@
 
 Control an FTMS walking pad from the Omarchy bar: connect, start, pause, resume,
 stop and set the speed in 0.1 km/h steps, with a live speed readout and a recorded
-training history. Each workout logs the kilometres the pad reported, in the same
-circles-and-days form as the Opushy pushup tracker.
+training history. Each workout logs its kilometres in the same circles-and-days
+form as the Opushy pushup tracker.
 
 Written for pads that speak Bluetooth LE Fitness Machine Service, and developed
 against a **Mobvoi Home Walking Pad** (the peripheral advertises itself as
@@ -78,9 +78,11 @@ interpreted as anything but an address.
 - The slider picks a target speed between 1.0 and 12.0 km/h in half-kilometre steps,
   with a numbered scale underneath so a value like 3.0 can be aimed at directly. The
   step buttons move it by 0.1 or 0.5, and the mouse wheel works over the slider. The
-  last speed is remembered.
-- The panel shows the live speed reported by the pad, the current state, the
-  workout distance, and the recorded activity below the controls.
+  last speed is remembered while stopped. Start uses 1.0 km/h because this pad
+  ignores a speed sent with Start; raise it after the belt is running.
+- The panel shows the live speed reported by the pad, the current state, and the
+  recorded activity. Below the treadmill controls, separated by a line, are the
+  session's distance in km, its active time and the estimated calories.
 
 > While idle the bar carries the days-since-last-workout disc. While the belt runs
 > it carries the kilometres of the current workout. A green dot means running, amber
@@ -88,11 +90,11 @@ interpreted as anything but an address.
 
 ## Activity
 
-Every workout started with **Start Treadmill** is a session. The daemon measures its
-distance from the pad's own odometer, so a shell reload does not restart the count,
+Every workout started with **Start Treadmill** is a session. The daemon integrates
+the pad's live speed into distance, so a shell reload does not restart the count,
 and records it when the belt stops. **Stop**, **Disconnect**, a dropped Bluetooth
 link and daemon shutdown all record the session, so a powered-off pad does not lose
-the kilometres already walked. A session shorter than 10 metres is ignored.
+the kilometres already walked.
 
 The panel shows the last workouts as green, amber and red discs, seven to a page.
 Each disc carries the kilometres of that session, and its colour is the gap to the
@@ -107,12 +109,63 @@ session before it:
 The bubble beside the panel's title, and the bar icon when the belt is idle, counts
 the days since the last recorded workout in the same colour. It shows `∞` before
 the first session. Use the arrows above the discs, or the left and right arrow keys,
-to page through them.
+to page through them. While the belt runs, the panel keeps the live controls and
+session metrics and hides the history chain; it returns when the belt stops.
 
-The panel does not use a target or a progression rule: the pad is the coach, and
-the history only records what it reported. The last session, the best session and
-the total number of sessions are shown above the discs. To start a fresh chain,
-delete `~/.local/state/owalky/activity.json` while the daemon is not running.
+The live block under the treadmill controls shows the session's distance, active
+time and calories. It appears only while a workout is active.
+
+The FTMS **Treadmill Data** characteristic (`0x2ACD`) is a notify characteristic,
+and its flags announce all three totals:
+
+| Field | FTMS flag | Bytes | This pad |
+|-------|-----------|-------|----------|
+| Total Distance | bit 2 | 4-6 | always zero |
+| Total Energy | bit 7 | 7-8 | always zero |
+| Elapsed Time | bit 10 | 12-13 | always zero |
+| Instantaneous Speed | bit 0 clear | 2-3 | live, 0.01 km/h |
+
+The flags are set, but this firmware sends zeros for the three totals. Owalky
+uses the one live value, instantaneous speed:
+
+* **Distance** is integrated from the instantaneous speed over elapsed time.
+  The speed field is the source; it is not the Total Distance field. Pauses stop
+  the integration.
+* **Time** is the daemon's own active timer, with pauses removed.
+* **Calories** are estimated from the distance and time at 70 kg, and marked
+  `estimated` under the number. If a pad ever sends a nonzero Total Energy, that
+  value is used instead and the mark disappears.
+
+These Owalky values do not depend on the treadmill's console.
+
+A session shorter than 10 metres is ignored. Each history entry also keeps the
+session's seconds and calories. When the belt stops, the live block disappears and
+the same numbers return as **Last session** below the activity chain. Before the
+first workout there is no metrics block and no row of zeroes.
+
+Owalky does not set a target or progression. It records the session totals and
+the gaps between sessions. The best session and session count sit above the discs;
+the last session's numbers sit below them. To start a fresh chain, delete
+`~/.local/state/owalky/activity.json` while the daemon is not running.
+
+### If the treadmill console stays at 0:00
+
+The console's time, distance and calories are its own workout counters. An FTMS
+Start does not start them. On this unit they also stayed at zero when started with
+the remote after a full power cycle, which points to the console or belt sensor,
+not the plugin. If the console stays at zero:
+
+1. Stop the belt, switch the treadmill off, unplug it, wait one minute, then plug
+   it in and switch it on. The manual gives this as the display-abnormality reset.
+2. Test the remote **with no Bluetooth connection** to Owalky, a phone or a watch.
+   The console should show its countdown and cycle through SPEED, TIME, DIST and CAL.
+3. If it still stays at zero, check the console-to-lower-control cable and any
+   fault code. `E01` is that communication cable; `E05` is external interference
+   and the same one-minute power cycle. A bench test with a meter is beyond the
+   plugin.
+
+Owalky does not write any console setting. It writes only FTMS start, stop, pause
+and speed commands, and none of that survives an unplug.
 
 ### From the command line
 
@@ -124,6 +177,7 @@ python3 -I owalky_helper.py activity                   # recorded workouts, one 
 python3 -I owalky_helper.py scan                       # pads advertising FTMS, as JSON
 python3 -I owalky_helper.py scan 20                    # listen for 20 seconds
 python3 -I owalky_helper.py --mac AA:BB:CC:DD:EE:FF connect
+python3 -I owalky_helper.py --mac AA:BB:CC:DD:EE:FF start 2.0   # target speed included
 python3 -I owalky_helper.py --mac AA:BB:CC:DD:EE:FF speed 3.5
 echo '{"mode":"run"}' | python3 -I owalky_helper.py config-set   # lift the 6.0 cap
 python3 -I owalky_helper.py log 40
@@ -163,11 +217,11 @@ quirks of this particular pad.
 - **No privileges.** Nothing is installed, elevated or run through a shell. The
   helper runs as your user with an absolute interpreter path and a fixed environment.
 - **Files written**, all `0600` inside `0700` directories:
-  - `~/.config/owalky/config.json` — MAC address, last speed, walk/run mode
-  - `~/.local/state/owalky/state.json` — current state and workout distance
-  - `~/.local/state/owalky/activity.json` — one entry per recorded workout, in metres
-  - `~/.local/state/owalky/owalky.log` — debug log, rotated at 256 KiB
-  - `~/.local/state/owalky/daemon.pid`, `daemon.sock` — daemon identity and socket
+  - `~/.config/owalky/config.json`: MAC address, last speed, walk/run mode
+  - `~/.local/state/owalky/state.json`: current state and workout distance
+  - `~/.local/state/owalky/activity.json`: one entry per recorded workout, in metres, seconds and kilocalories
+  - `~/.local/state/owalky/owalky.log`: debug log, rotated at 256 KiB
+  - `~/.local/state/owalky/daemon.pid`, `daemon.sock`: daemon identity and socket
 - The MAC address is a device identifier. It stays on this machine, in the files
   above. It is not in the repository and not in this README.
 - Every file the plugin reads is opened through a descriptor that is checked first

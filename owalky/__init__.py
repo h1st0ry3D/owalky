@@ -5,4 +5,4 @@ holds one job: the protocol codec, the file layer, the state and activity
 documents, process identity, the socket client, the daemon, the command line.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"

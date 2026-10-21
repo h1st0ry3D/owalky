@@ -43,6 +43,9 @@ Panel {
     property string macInput: ""
     property double currentSpeed: 1.0
     property double liveSpeed: 0.0
+    // The stored speed is applied once, on the first idle status after load.
+    // Later status polls must not overwrite the 1.0 a Start just selected.
+    property bool speedLoaded: false
     // The value the slider is being dragged to. Zero means "not dragging", and
     // the pad's minimum is 1.0, so it doubles as the flag.
     property double sliderPreview: 0.0
@@ -51,7 +54,6 @@ Panel {
     // the user's choice and it is stored with the rest of the configuration.
     property string mode: "walk"
     readonly property double maxSpeed: mode === "run" ? 12.0 : 6.0
-    property double distance: 0
     property bool connected: false
     property bool running: false
     property bool paused: false
@@ -59,6 +61,9 @@ Panel {
     // from the daemon, so a shell reload does not restart the count.
     property bool sessionActive: false
     property int sessionDistance: 0
+    property int sessionElapsed: 0
+    property int sessionCalories: 0
+    property bool sessionCaloriesEstimated: false
 
     // -- activity tracker
     property string lastTrainingDate: ""
@@ -77,6 +82,16 @@ Panel {
     // Clamped where it is read, so a shrinking history cannot point the strip
     // past the end.
     readonly property int page: Math.max(0, Math.min(root.historyPage, root.pageCount - 1))
+    readonly property var lastSessionEntry: root.history.length > 0
+        ? root.history[root.history.length - 1] : null
+    readonly property int lastMeters: root.lastSessionEntry
+        ? Progression.entryMeters(root.lastSessionEntry) : 0
+    readonly property int lastSeconds: root.lastSessionEntry
+        ? Progression.entrySeconds(root.lastSessionEntry) : 0
+    readonly property int lastCalories: root.lastSessionEntry
+        ? Progression.entryCalories(root.lastSessionEntry) : 0
+    readonly property bool lastCaloriesEstimated: root.lastSessionEntry
+        ? Progression.entryCaloriesEstimated(root.lastSessionEntry) : false
     property bool daemon: false
     property string errorText: ""
     // The last failed command, shown in the hero line until something works.
@@ -191,6 +206,7 @@ Panel {
         root.trainingDays = document.trainingDays
         root.history = document.history
         root.historyPage = root.pageCount - 1     // land on the newest sessions
+        root.nowMs = Date.now()
         root.activityError = ""
     }
 
@@ -354,20 +370,27 @@ Panel {
             root.mac = String(document.mac)
             root.macInput = root.mac
         }
-        if (document.lastSpeed !== undefined && root.sliderPreview === 0) {
-            var stored = root.clampSpeed(document.lastSpeed)
-            if (stored !== root.currentSpeed) root.currentSpeed = stored
+        if (!root.speedLoaded && document.running !== true && document.lastSpeed !== undefined) {
+            root.currentSpeed = root.clampSpeed(document.lastSpeed)
+            root.speedLoaded = true
         }
         if (document.speed !== undefined && isFinite(Number(document.speed)))
             root.liveSpeed = Number(document.speed)
-        if (document.distance !== undefined && isFinite(Number(document.distance)))
-            root.distance = Number(document.distance)
         root.sessionActive = document.sessionActive === true
-        if (root.sessionActive && document.sessionDistance !== undefined
-                && isFinite(Number(document.sessionDistance)))
-            root.sessionDistance = Math.max(0, Math.floor(Number(document.sessionDistance)))
-        else if (!root.sessionActive)
+        if (root.sessionActive) {
+            if (document.sessionDistance !== undefined && isFinite(Number(document.sessionDistance)))
+                root.sessionDistance = Math.max(0, Math.floor(Number(document.sessionDistance)))
+            if (document.sessionElapsed !== undefined && isFinite(Number(document.sessionElapsed)))
+                root.sessionElapsed = Math.max(0, Math.floor(Number(document.sessionElapsed)))
+            if (document.sessionCalories !== undefined && isFinite(Number(document.sessionCalories)))
+                root.sessionCalories = Math.max(0, Math.floor(Number(document.sessionCalories)))
+            root.sessionCaloriesEstimated = document.sessionCaloriesEstimated === true
+        } else {
             root.sessionDistance = 0
+            root.sessionElapsed = 0
+            root.sessionCalories = 0
+            root.sessionCaloriesEstimated = false
+        }
         var wasRunning = root.running
         root.daemon = document.daemon === true
         root.connected = document.connected === true
@@ -1010,18 +1033,6 @@ Panel {
                             font.bold: true
                         }
 
-                        Text {
-                            width: parent.width
-                            horizontalAlignment: Text.AlignHCenter
-                            text: root.sessionActive
-                                ? "This session: " + Progression.metersLabel(root.sessionDistance)
-                                : "This session: waiting for the pad"
-                            textFormat: Text.PlainText
-                            color: Util.alpha(Color.foreground, 0.7)
-                            font.family: Style.font.family
-                            font.pixelSize: Style.font.bodySmall
-                        }
-
                         Row {
                             anchors.horizontalCenter: parent.horizontalCenter
                             spacing: Style.space(8)
@@ -1141,7 +1152,17 @@ Panel {
                             width: parent.width
                             text: "Start Treadmill"
                             enabled: !root.busy
-                            onClicked: { root.saveConfig(); root.sendBelt("start") }
+                            onClicked: {
+                                // This pad starts at 1.0 km/h and ignores a speed
+                                // sent with Start. Show that value instead of the
+                                // remembered target; the slider is a target again
+                                // once the user changes it.
+                                root.saveConfig()
+                                root.speedLoaded = true
+                                root.currentSpeed = 1.0
+                                root.liveSpeed = 1.0
+                                root.sendBelt("start")
+                            }
                         }
 
                         Button {
@@ -1181,7 +1202,30 @@ Panel {
                         }
                     }
 
-                    PanelSeparator { foreground: Color.foreground }
+                    // Live session numbers, only while a workout is active.
+                    // There is no block of zeroes before the first session.
+                    PanelSeparator {
+                        visible: root.sessionActive
+                        foreground: Color.foreground
+                    }
+
+                    SessionMetrics {
+                        width: parent.width
+                        visible: root.sessionActive
+                        label: "This session"
+                        meters: root.sessionDistance
+                        seconds: root.sessionElapsed
+                        calories: root.sessionCalories
+                        estimated: root.sessionCaloriesEstimated
+                    }
+
+                    // The activity chain is for the stopped state: during a
+                    // workout the panel stays on the live controls and metrics,
+                    // and the history comes back with Start Treadmill.
+                    PanelSeparator {
+                        visible: !root.running
+                        foreground: Color.foreground
+                    }
 
                     // One disc per workout, in the same shape as the pushup
                     // tracker: the gap to the session before it sets the colour,
@@ -1189,6 +1233,7 @@ Panel {
                     // one. The treadmill controls above start and end a session.
                     ProgressSection {
                         width: parent.width
+                        visible: !root.running
                         history: root.history
                         page: root.page
                         pageCount: root.pageCount
@@ -1196,6 +1241,23 @@ Panel {
                         activityError: root.activityError
                         onPreviousPageRequested: root.pagePrevious()
                         onNextPageRequested: root.pageNext()
+                    }
+
+                    // The finished session's numbers live below the chain; the
+                    // live block above only exists while the workout is active.
+                    PanelSeparator {
+                        visible: !root.running && !root.sessionActive && root.history.length > 0
+                        foreground: Color.foreground
+                    }
+
+                    SessionMetrics {
+                        width: parent.width
+                        visible: !root.running && !root.sessionActive && root.history.length > 0
+                        label: "Last session"
+                        meters: root.lastMeters
+                        seconds: root.lastSeconds
+                        calories: root.lastCalories
+                        estimated: root.lastCaloriesEstimated
                     }
                 }
             }

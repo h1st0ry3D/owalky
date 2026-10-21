@@ -26,7 +26,9 @@ from .ftms import (
 from .identity import daemon_alive
 from .storage import (
     CONFIG_FILE,
+    MAX_CALORIES,
     MAX_CONFIG_BYTES,
+    MAX_SESSION_SECONDS,
     MAX_STATE_BYTES,
     STATE_FILE,
     StorageError,
@@ -71,6 +73,23 @@ def clean_state(raw: object) -> dict:
         and 0 <= session_distance <= MAX_DISTANCE_M
     ):
         state["sessionDistance"] = session_distance
+    session_elapsed = raw.get("sessionElapsed")
+    if (
+        isinstance(session_elapsed, int)
+        and not isinstance(session_elapsed, bool)
+        and 0 <= session_elapsed <= MAX_SESSION_SECONDS
+    ):
+        state["sessionElapsed"] = session_elapsed
+    session_calories = raw.get("sessionCalories")
+    if (
+        isinstance(session_calories, int)
+        and not isinstance(session_calories, bool)
+        and 0 <= session_calories <= MAX_CALORIES
+    ):
+        state["sessionCalories"] = session_calories
+    for key in ("sessionCaloriesEstimated",):
+        if isinstance(raw.get(key), bool):
+            state[key] = raw[key]
     for key in ("error", "updated"):
         value = raw.get(key)
         if isinstance(value, str):
@@ -192,6 +211,9 @@ def status_document() -> dict:
         "distance": state.get("distance", 0),
         "sessionActive": bool(alive and state.get("sessionActive")),
         "sessionDistance": state.get("sessionDistance", 0) if alive else 0,
+        "sessionElapsed": state.get("sessionElapsed", 0) if alive else 0,
+        "sessionCalories": state.get("sessionCalories", 0) if alive else 0,
+        "sessionCaloriesEstimated": bool(alive and state.get("sessionCaloriesEstimated")),
         "error": state.get("error", ""),
         "mac": config.get("mac", ""),
         "lastSpeed": config.get("lastSpeed", 1.0),

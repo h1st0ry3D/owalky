@@ -41,10 +41,21 @@ MAX_NOTIFICATION_BYTES = 64
 #: Flags field plus at least one announced field.
 MIN_NOTIFICATION_BYTES = 2
 
-#: 0x0001 speed present, 0x0002 instantaneous stride, 0x0004 distance present.
-_FLAG_SPEED = 0x0001
-_FLAG_STRIDE = 0x0002
+#: Treadmill Data flag bits (FTMS 1.0, current GATT Specification). Bit 0 is
+#: inverted: it is set when there is more data / no instantaneous speed.
+_FLAG_MORE_DATA = 0x0001
+_FLAG_AVERAGE_SPEED = 0x0002
 _FLAG_DISTANCE = 0x0004
+_FLAG_INCLINATION = 0x0008
+_FLAG_ELEVATION = 0x0010
+_FLAG_INSTANT_PACE = 0x0020
+_FLAG_AVERAGE_PACE = 0x0040
+_FLAG_ENERGY = 0x0080
+_FLAG_HEART_RATE = 0x0100
+_FLAG_MET = 0x0200
+_FLAG_ELAPSED = 0x0400
+_FLAG_REMAINING = 0x0800
+_FLAG_FORCE_POWER = 0x1000
 
 MAC_PATTERN = re.compile(r"\A(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}\Z")
 
@@ -116,6 +127,8 @@ class TreadmillSample:
     flags: int
     speed_kmh: float | None = None
     distance_m: int | None = None
+    elapsed_s: int | None = None
+    energy_kcal: int | None = None
 
     @classmethod
     def decode(cls, data: bytes) -> TreadmillSample | None:
@@ -128,17 +141,73 @@ class TreadmillSample:
             return None
         flags = data[0] | (data[1] << 8)
         offset = 2
+
+        def take(size: int) -> int | None:
+            """Consume one little-endian field, or None when it does not fit."""
+            nonlocal offset
+            if len(data) < offset + size:
+                return None
+            value = int.from_bytes(data[offset : offset + size], "little")
+            offset += size
+            return value
+
         speed: float | None = None
         distance: int | None = None
-        if flags & _FLAG_SPEED:
-            if len(data) < offset + 2:
+        elapsed: int | None = None
+        energy: int | None = None
+
+        # Present when bit 0 is 0. This pad sends bit 0 as 0 and puts the
+        # instantaneous speed at bytes 2-3.
+        if not flags & _FLAG_MORE_DATA:
+            value = take(2)
+            if value is None:
                 return None
-            speed = (data[offset] | (data[offset + 1] << 8)) / 100.0
-            offset += 2
-        if flags & _FLAG_STRIDE:
-            offset += 2  # stride is reported but not used by the panel
+            speed = value / 100.0
+        if flags & _FLAG_AVERAGE_SPEED:
+            if take(2) is None:
+                return None
         if flags & _FLAG_DISTANCE:
-            if len(data) < offset + 3:
+            distance = take(3)
+            if distance is None:
                 return None
-            distance = int.from_bytes(data[offset : offset + 3], "little")
-        return cls(flags=flags, speed_kmh=speed, distance_m=distance)
+        if flags & _FLAG_INCLINATION:
+            if take(4) is None:
+                return None
+        if flags & _FLAG_ELEVATION:
+            if take(4) is None:
+                return None
+        if flags & _FLAG_INSTANT_PACE:
+            if take(2) is None:
+                return None
+        if flags & _FLAG_AVERAGE_PACE:
+            if take(2) is None:
+                return None
+        if flags & _FLAG_ENERGY:
+            energy = take(2)
+            if energy is None or take(2) is None or take(1) is None:
+                return None
+        if flags & _FLAG_HEART_RATE:
+            if take(1) is None:
+                return None
+        if flags & _FLAG_MET:
+            if take(1) is None:
+                return None
+        if flags & _FLAG_ELAPSED:
+            elapsed = take(2)
+            if elapsed is None:
+                return None
+        if flags & _FLAG_REMAINING:
+            if take(2) is None:
+                return None
+        if flags & _FLAG_FORCE_POWER:
+            if take(4) is None:
+                return None
+        # Bits 13-15 are reserved and announce no field. The pad sets bit 13
+        # and appends three vendor bytes after the elapsed time; neither is read.
+        return cls(
+            flags=flags,
+            speed_kmh=speed,
+            distance_m=distance,
+            elapsed_s=elapsed,
+            energy_kcal=energy,
+        )

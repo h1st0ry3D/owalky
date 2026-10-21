@@ -65,6 +65,9 @@ Item {
         // of the disc than a plain caption would.
         font.pixelSize: bubble.labelPixelSize
         font.family: Style.font.family
+        // The underline separates Owalky's day disc from Opushy's when both
+        // sit in the bar.
+        font.underline: true
         color: bubble.singleColour ? Color.bar.background : "white"
     }
 

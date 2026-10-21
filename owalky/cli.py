@@ -70,7 +70,12 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"how long to listen, clamped to {MIN_SCAN_SECONDS}-{MAX_SCAN_SECONDS} seconds",
     )
     subcommands.add_parser("connect", help="start the daemon and claim the pad")
-    subcommands.add_parser("start", help="start the belt")
+    start_parser = subcommands.add_parser("start", help="start the belt")
+    start_parser.add_argument(
+        "value",
+        nargs="?",
+        help="target speed in km/h; otherwise the stored last speed",
+    )
     subcommands.add_parser("pause", help="pause the belt")
     subcommands.add_parser("resume", help="resume the belt")
     subcommands.add_parser("stop", help="stop the belt, staying connected")
@@ -190,18 +195,26 @@ def command_forward(arguments: argparse.Namespace) -> int:
     """Forward a belt command to the daemon and report what it answered."""
     command = arguments.command
     if command == "speed":
-        ceiling = max_speed_for(load_config().get("mode", DEFAULT_MODE))
-        speed = clamp_speed(arguments.value, ceiling)
-        if float(arguments.value) > ceiling:
-            print(
-                f"clamped to {ceiling:.1f} km/h: {arguments.value} is over the "
-                f"walk-mode limit, switch to run mode for more"
-            )
-        save_config({"lastSpeed": speed})
-        with state_dir() as dir_fd:
-            log_append(dir_fd, f"speed {speed} km/h requested")
-        return forward(f"speed {speed:.1f}")
+        return forward_speed(arguments.value)
+    if command == "start" and arguments.value is not None:
+        return forward_speed(arguments.value, start=True)
     return forward(command)
+
+
+def forward_speed(value: str, *, start: bool = False) -> int:
+    """Store a validated speed and forward it, optionally as part of Start."""
+    ceiling = max_speed_for(load_config().get("mode", DEFAULT_MODE))
+    speed = clamp_speed(value, ceiling)
+    if float(value) > ceiling:
+        print(
+            f"clamped to {ceiling:.1f} km/h: {value} is over the "
+            f"walk-mode limit, switch to run mode for more"
+        )
+    save_config({"lastSpeed": speed})
+    verb = "start" if start else "speed"
+    with state_dir() as dir_fd:
+        log_append(dir_fd, f"{verb} {speed} km/h requested")
+    return forward(f"{verb} {speed:.1f}")
 
 
 # -- helpers

@@ -149,6 +149,18 @@ class CommandLineTests(TempHomeTest):
         self.assertEqual(load_config()["lastSpeed"], 9.0)
         self.assertNotIn("clamped", self.output)
 
+    def test_start_accepts_and_stores_a_target_speed(self):
+        save_config({"mode": "walk"})
+        self.run_cli(["start", "2.5"])
+        self.assertEqual(load_config()["lastSpeed"], 2.5)
+        self.assertIn("no daemon", self.output)
+
+    def test_start_target_is_clamped_like_a_speed_command(self):
+        save_config({"mode": "walk"})
+        self.run_cli(["start", "9.0"])
+        self.assertEqual(load_config()["lastSpeed"], 6.0)
+        self.assertIn("clamped to 6.0", self.output)
+
     def test_a_valid_mode_is_accepted_from_stdin(self):
         code = self.run_cli(["config-set"], stdin=b'{"mode": "run"}\n')
         self.assertEqual(code, 0)

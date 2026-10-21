@@ -24,8 +24,6 @@ Column {
     spacing: Style.space(10)
 
     readonly property int record: Progression.recordMeters(progress.history)
-    readonly property int lastMeters: progress.history.length > 0
-        ? Progression.entryMeters(progress.history[progress.history.length - 1]) : 0
 
     Text {
         width: parent.width
@@ -42,11 +40,10 @@ Column {
         width: parent.width
         horizontalAlignment: Text.AlignHCenter
         text: progress.history.length > 0
-            ? "Last " + Progression.metersLabel(progress.lastMeters)
-              + "  •  Best " + Progression.metersLabel(progress.record)
+            ? "Best " + Progression.metersLabel(progress.record)
               + "  •  " + progress.trainingDays
               + (progress.trainingDays === 1 ? " session" : " sessions")
-            : "No sessions yet — start the treadmill; the distance is logged when you stop"
+            : "No sessions yet. Start the treadmill; the distance is logged when you stop"
         textFormat: Text.PlainText
         color: Util.alpha(Color.foreground, 0.7)
         font.family: Style.font.family

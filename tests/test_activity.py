@@ -20,6 +20,7 @@ from owalky.activity import (
     MIN_SESSION_METERS,
     clean_activity,
     empty_activity,
+    estimate_calories,
     load_activity,
     record_session,
 )
@@ -68,7 +69,18 @@ class CleanActivityTests(unittest.TestCase):
                 ]
             }
         )
-        self.assertEqual(cleaned["history"], [{"time": "2026-09-09T12:00:00Z", "meters": 1200}])
+        self.assertEqual(
+            cleaned["history"],
+            [
+                {
+                    "time": "2026-09-09T12:00:00Z",
+                    "meters": 1200,
+                    "seconds": 0,
+                    "calories": 0,
+                    "estimated": False,
+                }
+            ],
+        )
 
     def test_history_is_capped_to_the_newest_entries(self):
         history = [
@@ -89,9 +101,12 @@ class CleanActivityTests(unittest.TestCase):
 class RecordSessionTests(TempHomeTest):
     def test_the_first_session_creates_the_file(self):
         with storage.state_dir() as dir_fd:
-            document = record_session(dir_fd, 2400)
+            document = record_session(dir_fd, 2400, 600, 42, estimated=True)
             self.assertEqual(document["trainingDays"], 1)
             self.assertEqual(document["history"][0]["meters"], 2400)
+            self.assertEqual(document["history"][0]["seconds"], 600)
+            self.assertEqual(document["history"][0]["calories"], 42)
+            self.assertIs(document["history"][0]["estimated"], True)
             self.assertEqual(load_activity(dir_fd), document)
             mode = os.fstat(
                 os.open(storage.ACTIVITY_FILE, os.O_RDONLY, dir_fd=dir_fd)
@@ -125,6 +140,25 @@ class RecordSessionTests(TempHomeTest):
             for value in (12.5, "300", True, None):
                 with self.subTest(value=value), self.assertRaises(ValueError):
                     record_session(dir_fd, value)
+
+    def test_time_and_calories_must_be_whole_numbers_in_range(self):
+        with storage.state_dir() as dir_fd:
+            for keyword, value in (
+                ("seconds", 12.5),
+                ("seconds", "300"),
+                ("seconds", True),
+                ("seconds", activity.MAX_SESSION_SECONDS + 1),
+                ("calories", 1.5),
+                ("calories", activity.MAX_CALORIES + 1),
+            ):
+                with self.subTest(keyword=keyword, value=value), self.assertRaises(ValueError):
+                    record_session(dir_fd, 1200, **{keyword: value})
+
+    def test_the_fallback_calorie_estimate_is_monotonic(self):
+        self.assertEqual(estimate_calories(0, 100), 0)
+        self.assertEqual(estimate_calories(1000, 0), 0)
+        self.assertLess(estimate_calories(1000, 600), estimate_calories(2000, 600))
+        self.assertGreater(estimate_calories(1000, 600), 0)
 
     def test_a_malformed_file_reads_as_empty_and_is_replaced(self):
         with storage.state_dir() as dir_fd:

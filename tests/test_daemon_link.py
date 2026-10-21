@@ -16,6 +16,7 @@ import unittest
 from unittest import mock
 
 from owalky import daemon as daemon_module
+from owalky import ftms
 from owalky.activity import MIN_SESSION_METERS, load_activity
 from owalky.cli import clear_connection_state, spawn_daemon
 from owalky.daemon import MEASUREMENT_TIMEOUT_SECONDS, PadDaemon
@@ -70,7 +71,7 @@ class LinkLossTests(unittest.TestCase):
 
     def test_a_measurement_clears_the_silence(self):
         instance = self.daemon_with(StubClient(), measured_ago=99)
-        instance._on_measurement(None, bytearray.fromhex("01006400"))
+        instance._on_measurement(None, bytearray.fromhex("00006400"))
         self.assertIsNone(instance.link_loss_reason())
 
 
@@ -197,14 +198,14 @@ class ShutdownOrderTests(unittest.TestCase):
             save_state(dir_fd, {"connected": True, "running": True})
         instance.client = StubClient(connected=True)
         instance.closing = True
-        instance._on_measurement(None, bytearray.fromhex("01006400"))
+        instance._on_measurement(None, bytearray.fromhex("00006400"))
         self.assertIs(self.read_state().get("connected"), True)  # untouched, not re-published
         self.assertIs(instance._last_measurement > 0, True)  # the watchdog clock still runs
 
     def test_a_notification_while_live_is_published(self):
         instance = PadDaemon(MAC)
         instance.client = StubClient(connected=True)
-        instance._on_measurement(None, bytearray.fromhex("01006400"))
+        instance._on_measurement(None, bytearray.fromhex("00006400"))
         state = self.read_state()
         self.assertIs(state.get("connected"), True)
         self.assertEqual(state.get("speed"), 1.0)
@@ -236,8 +237,39 @@ class ShutdownOrderTests(unittest.TestCase):
 
 
 def distance_payload(meters: int) -> bytearray:
-    """One Treadmill Data notification carrying only the distance field."""
-    return bytearray(bytes((0x04, 0x00)) + meters.to_bytes(3, "little"))
+    """One Treadmill Data notification with speed 0 and a distance.
+
+    Instantaneous speed is present whenever flag bit 0 is clear, so the two
+    zero bytes at offset 2 are part of every distance notification.
+    """
+    return bytearray(
+        bytes((0x04, 0x00)) + (0).to_bytes(2, "little") + meters.to_bytes(3, "little")
+    )
+
+
+def speed_payload(kmh: float) -> bytearray:
+    """A speed-only Treadmill Data notification."""
+    return bytearray(bytes((0x00, 0x00)) + int(round(kmh * 100)).to_bytes(2, "little"))
+
+
+def metric_payload(
+    meters: int, *, energy: int = 0, elapsed: int = 0, speed_centi: int = 300
+) -> bytearray:
+    """A pad-shaped notification with distance, Total Energy and Elapsed Time.
+
+    Flags 0x2484 is what the Mobvoi pad sends: distance, energy, elapsed time,
+    plus its reserved bit 13 and the three vendor bytes that follow it.
+    """
+    return bytearray(
+        bytes((0x84, 0x24))
+        + speed_centi.to_bytes(2, "little")
+        + meters.to_bytes(3, "little")
+        + energy.to_bytes(2, "little")
+        + (0).to_bytes(2, "little")
+        + bytes((0,))
+        + elapsed.to_bytes(2, "little")
+        + b"\x00\x00\x00"
+    )
 
 
 class SessionTrackingTests(unittest.TestCase):
@@ -322,6 +354,103 @@ class SessionTrackingTests(unittest.TestCase):
         self.assertEqual(instance.session_distance_m, 0)
         instance._on_measurement(None, distance_payload(5200))
         self.assertEqual(instance.session_distance_m, 200)
+
+    def test_energy_and_elapsed_time_from_the_pad_fill_the_session(self):
+        instance = PadDaemon(MAC)
+        instance._on_measurement(None, metric_payload(1000, energy=0, elapsed=0))
+        instance._begin_session()
+        instance._on_measurement(None, metric_payload(1400, energy=20, elapsed=60))
+        self.assertEqual(instance.session_distance_m, 400)
+        self.assertEqual(instance.session_calories_kcal, 20)
+        self.assertIs(instance._calories_from_pad, True)
+
+    def test_a_stale_energy_total_is_subtracted_from_the_session(self):
+        instance = PadDaemon(MAC)
+        instance._on_measurement(None, metric_payload(1000, energy=5, elapsed=0))
+        instance._begin_session()
+        instance._on_measurement(None, metric_payload(1100, energy=5, elapsed=10))
+        self.assertEqual(instance.session_calories_kcal, 0)
+        instance._on_measurement(None, metric_payload(1200, energy=25, elapsed=20))
+        self.assertEqual(instance.session_calories_kcal, 20)
+
+    def test_the_recorded_session_carries_time_and_calories(self):
+        instance = PadDaemon(MAC)
+        instance._on_measurement(None, metric_payload(1000, energy=0, elapsed=0))
+        instance._begin_session()
+        instance._on_measurement(None, metric_payload(1400, energy=20, elapsed=60))
+        instance._session_started -= 600
+        self.assertEqual(instance._finish_session(), 400)
+        document = self.history()
+        entry = document["history"][-1]
+        self.assertGreaterEqual(entry["seconds"], 600)
+        self.assertEqual(entry["calories"], 20)
+        self.assertIs(entry["estimated"], False)
+
+    def test_the_fallback_calorie_estimate_is_marked_estimated(self):
+        instance = PadDaemon(MAC)
+        instance._on_measurement(None, distance_payload(0))
+        instance._begin_session()
+        instance._on_measurement(None, distance_payload(400))
+        instance._session_started -= 600
+        instance._refresh_session_metrics()
+        self.assertGreater(instance.session_calories_kcal, 0)
+        self.assertIs(instance._calories_from_pad, False)
+        instance._published_at = 0.0
+        instance._on_measurement(None, distance_payload(500))
+        with state_dir() as dir_fd:
+            document = load_state(dir_fd)
+        self.assertIs(document.get("sessionCaloriesEstimated"), True)
+        self.assertGreater(document.get("sessionCalories"), 0)
+        self.assertGreaterEqual(document.get("sessionElapsed"), 600)
+
+    def test_speed_integration_is_used_when_the_distance_field_stays_zero(self):
+        instance = PadDaemon(MAC)
+        instance._on_measurement(None, speed_payload(2.0))
+        instance._begin_session()
+        instance._last_speed_kmh = 2.0
+        for _ in range(6):                     # six 5s samples at 2.0 km/h
+            instance._last_speed_at -= 5.0
+            instance._on_measurement(None, speed_payload(2.0))
+        expected = instance.session_distance_m
+        self.assertGreaterEqual(expected, 16)
+        self.assertEqual(instance._finish_session(), expected)
+
+    def test_start_defaults_to_one_kmh(self):
+        instance = PadDaemon(MAC)
+        client = StubClient()
+        instance.client = client
+        asyncio.run(instance._belt_command("start", []))
+        self.assertEqual(client.writes, [ftms.OP_START_RESUME])
+        self.assertEqual(instance.speed_kmh, 1.0)
+
+    def test_start_sends_the_target_speed_before_and_after_start(self):
+        instance = PadDaemon(MAC)
+        client = StubClient()
+        instance.client = client
+        asyncio.run(instance._belt_command("start", ["2.5"]))
+        self.assertEqual(
+            client.writes,
+            [ftms.OP_START_RESUME, ftms.encode_speed(2.5)],
+        )
+        self.assertEqual(instance.speed_kmh, 2.5)
+
+    def test_a_zero_energy_field_falls_back_to_the_calorie_estimate(self):
+        # This is what the Mobvoi pad does: Expended Energy is announced and
+        # always zero while the Total Distance field is zero too.
+        instance = PadDaemon(MAC)
+        instance._on_measurement(None, metric_payload(0, energy=0, elapsed=0))
+        instance._begin_session()
+        instance._last_speed_kmh = 2.0
+        instance._session_started -= 600
+        for _ in range(6):                     # enough samples to pass 10 m
+            instance._last_speed_at -= 5.0
+            instance._on_measurement(None, metric_payload(0, energy=0, elapsed=0, speed_centi=200))
+        self.assertGreater(instance.session_distance_m, 0)
+        self.assertIs(instance._calories_from_pad, False)
+        self.assertGreater(instance.session_calories_kcal, 0)
+        instance._finish_session()
+        entry = self.history()["history"][-1]
+        self.assertIs(entry["estimated"], True)
 
 
 class ConstantTests(unittest.TestCase):

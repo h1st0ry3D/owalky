@@ -20,7 +20,9 @@ import time
 from .storage import (
     ACTIVITY_FILE,
     MAX_ACTIVITY_BYTES,
+    MAX_CALORIES,
     MAX_METERS,
+    MAX_SESSION_SECONDS,
     read_file,
     write_file,
 )
@@ -29,6 +31,11 @@ HISTORY_MAX = 400
 MAX_TRAINING_DAYS = 1_000_000
 MIN_SESSION_METERS = 10
 MAX_TS_LEN = 32
+
+#: Fallback weight for the calorie estimate. The Mobvoi pad sets the FTMS
+#: Expended Energy flag but sends zero, so this estimate is the normal path for
+#: it. The value is a rough 70 kg walking estimate.
+DEFAULT_WEIGHT_KG = 70.0
 
 #: The same shape as core/Progression.js TS_PATTERN. This module writes whole
 #: seconds, and a document from the QML side may carry fractional ones.
@@ -67,7 +74,18 @@ def clean_activity(payload: object) -> dict:
             if not stamp:
                 continue
             meters = _bounded_int(entry.get("meters"), 0, MAX_METERS, 0)
-            history.append({"time": stamp, "meters": meters})
+            seconds = _bounded_int(entry.get("seconds"), 0, MAX_SESSION_SECONDS, 0)
+            calories = _bounded_int(entry.get("calories"), 0, MAX_CALORIES, 0)
+            estimated = entry.get("estimated") is True
+            history.append(
+                {
+                    "time": stamp,
+                    "meters": meters,
+                    "seconds": seconds,
+                    "calories": calories,
+                    "estimated": estimated,
+                }
+            )
     return {
         "lastTrainingDate": _timestamp(payload.get("lastTrainingDate")),
         "trainingDays": _bounded_int(payload.get("trainingDays"), 0, MAX_TRAINING_DAYS, 0),
@@ -103,25 +121,65 @@ def save_activity(dir_fd: int, activity: dict) -> dict:
     return document
 
 
-def record_session(dir_fd: int, meters: object, now: float | None = None) -> dict:
+def _whole_int(value: object, low: int, high: int, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be a whole number")
+    if not low <= value <= high:
+        raise ValueError(f"{name} must be {low}-{high}")
+    return value
+
+
+def estimate_calories(meters: int, seconds: int) -> int:
+    """A walking estimate for a pad that does not announce Total Energy.
+
+    The ACSM walking equation at 0% grade gives MET = 1 + 0.476 * km/h. One MET
+    is 3.5 ml O2/kg/min, and 1 litre of O2 is about 5 kcal, so kcal/min is
+    MET * 3.5 * kg / 200. The weight is the fallback constant above; this is
+    reached when the pad sends no nonzero Total Energy.
+    """
+    if meters <= 0 or seconds <= 0:
+        return 0
+    speed_kmh = (meters / 1000.0) / (seconds / 3600.0)
+    met = 1.0 + 0.476 * speed_kmh
+    kcal = met * 3.5 * DEFAULT_WEIGHT_KG / 200.0 * (seconds / 60.0)
+    return min(MAX_CALORIES, max(0, round(kcal)))
+
+
+def record_session(
+    dir_fd: int,
+    meters: object,
+    seconds: object = 0,
+    calories: object = 0,
+    estimated: bool = False,
+    now: float | None = None,
+) -> dict:
     """Append one completed session and return the new document.
 
-    Short sessions are not recorded: the caller uses this only for a distance at
-    or above :data:`MIN_SESSION_METERS`, but the check lives here too so a direct
-    caller cannot write a zero-length workout into the chain.
+    A distance below :data:`MIN_SESSION_METERS` is refused, so a caller cannot
+    write a zero-length workout into the chain.
 
     Raises:
-        ValueError: the distance is not a whole number of metres in range.
+        ValueError: a value is not a whole number in range.
         StorageError: the document could not be written.
     """
-    if isinstance(meters, bool) or not isinstance(meters, int):
-        raise ValueError("session distance must be whole metres")
-    if not MIN_SESSION_METERS <= meters <= MAX_METERS:
-        raise ValueError(f"session distance must be {MIN_SESSION_METERS}-{MAX_METERS} metres")
+    meters = _whole_int(meters, MIN_SESSION_METERS, MAX_METERS, "session distance")
+    seconds = _whole_int(seconds, 0, MAX_SESSION_SECONDS, "session time")
+    calories = _whole_int(calories, 0, MAX_CALORIES, "session calories")
 
     document = load_activity(dir_fd)
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
-    document["history"] = (document["history"] + [{"time": stamp, "meters": meters}])[-HISTORY_MAX:]
+    document["history"] = (
+        document["history"]
+        + [
+            {
+                "time": stamp,
+                "meters": meters,
+                "seconds": seconds,
+                "calories": calories,
+                "estimated": bool(estimated),
+            }
+        ]
+    )[-HISTORY_MAX:]
     document["lastTrainingDate"] = stamp
     document["trainingDays"] = min(MAX_TRAINING_DAYS, document["trainingDays"] + 1)
     return save_activity(dir_fd, document)
@@ -129,11 +187,14 @@ def record_session(dir_fd: int, meters: object, now: float | None = None) -> dic
 
 __all__ = [
     "HISTORY_MAX",
+    "MAX_CALORIES",
+    "MAX_SESSION_SECONDS",
     "MAX_TRAINING_DAYS",
     "MIN_SESSION_METERS",
     "clean_activity",
     "dump_activity",
     "empty_activity",
+    "estimate_calories",
     "load_activity",
     "record_session",
     "save_activity",

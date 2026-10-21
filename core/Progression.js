@@ -11,10 +11,8 @@ var MS_PER_DAY = 86400000
 // What an unusable date reads as: far past the decay threshold.
 var UNKNOWN_DAYS = 999
 
-// ---- storage limits, mirrored in owalky/activity.py ----
-var MAX_METERS = 10000000
-var MAX_TRAINING_DAYS = 1000000
-var HISTORY_MAX = 400
+// The writer owns the document limits; this module only needs the timestamp
+// length for validation.
 var MAX_TS_LEN = 32
 
 // ---- history strip ----
@@ -41,12 +39,13 @@ function parseTimestamp(value) {
     return isFinite(ms) ? ms : NaN
 }
 
-// Whole days between a stored timestamp and `nowMs`. A date in the future gives
-// a negative count, which reads as recent.
+// Whole days between a stored timestamp and `nowMs`. A future timestamp reads
+// as today, not as -1d. A panel left open while a session is recorded has an
+// older nowMs, so the clamp also covers the moment the session is written.
 function daysSince(value, nowMs) {
     var ms = parseTimestamp(value)
     if (!isFinite(ms)) return UNKNOWN_DAYS
-    return Math.floor((nowMs - ms) / MS_PER_DAY)
+    return Math.max(0, Math.floor((nowMs - ms) / MS_PER_DAY))
 }
 
 // Ms from `nowMs` to the next day boundary, so a day count can be re-evaluated
@@ -77,6 +76,33 @@ function entryMeters(entry) {
     if (!entry || typeof entry !== "object") return 0
     var meters = Number(entry.meters)
     return isFinite(meters) ? Math.max(0, Math.floor(meters)) : 0
+}
+
+function entrySeconds(entry) {
+    if (!entry || typeof entry !== "object") return 0
+    var seconds = Number(entry.seconds)
+    return isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : 0
+}
+
+function entryCalories(entry) {
+    if (!entry || typeof entry !== "object") return 0
+    var calories = Number(entry.calories)
+    return isFinite(calories) ? Math.max(0, Math.floor(calories)) : 0
+}
+
+function entryCaloriesEstimated(entry) {
+    return !!(entry && typeof entry === "object" && entry.estimated === true)
+}
+
+// A clock label for the workout time: 4:07, or 1:04:07 once it passes an hour.
+function formatDuration(seconds) {
+    var total = Math.max(0, Math.floor(Number(seconds) || 0))
+    var hours = Math.floor(total / 3600)
+    var minutes = Math.floor((total % 3600) / 60)
+    var rest = total % 60
+    var tail = (rest < 10 ? "0" : "") + rest
+    if (hours > 0) return hours + ":" + (minutes < 10 ? "0" : "") + minutes + ":" + tail
+    return minutes + ":" + tail
 }
 
 // The status of a recorded session, derived from the gap to the one before it.
