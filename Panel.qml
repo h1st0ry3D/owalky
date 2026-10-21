@@ -109,6 +109,23 @@ Panel {
     property int dotsPhase: 0
     readonly property bool waiting: root.scanning || root.pending !== ""
 
+    // -- backup and restore
+    // The restore question, and the path it is about, once the user has picked
+    // a file and said yes. Nothing is written until they confirm.
+    property bool askingRestore: false
+    property string chosenRestorePath: ""
+    // What the last backup or restore reported, and when it was, so the panel
+    // can say so instead of leaving the button as the only sign it happened.
+    property string fileNotice: ""
+    // The folder the activity file and its backups live in, as the helper
+    // resolves it. Empty until the first status document has arrived.
+    property string stateDir: ""
+    // The file operation the running helper is doing, and the path it reads on
+    // stdin. The path is never an argument, so it is not in any argv.
+    property string fileVerb: ""
+    property string filePayload: ""
+    property bool fileTimedOut: false
+
     // A 1.5s poll, and the config write that rides along with an action, must not
     // disable the controls. Only a belt command does.
     property bool busy: commandProcess.running
@@ -121,6 +138,20 @@ Panel {
     // The MAC and link controls are setup, not workout UI. Hide them while a
     // session is running, including the separator above them.
     readonly property bool connectionAreaVisible: !root.running && !root.sessionActive
+
+    // A backup copies a file that only changes when a workout ends, and a
+    // restore replaces it. Both are refused while the belt runs, while a link
+    // change is pending, and while another file operation is in flight.
+    readonly property bool backupProcessBusy: backupProcess.running
+    readonly property bool canUseFiles: !root.running && !root.paused && !root.sessionActive
+                                        && root.pending === "" && !root.busy
+                                        && !root.backupProcessBusy
+
+    // The chosen file's name on its own, for the restore question. The whole
+    // path is not shown: it is long, and it is not what identifies the file.
+    readonly property string restoreFileName: root.chosenRestorePath === "" ? ""
+        : root.plain(root.chosenRestorePath.substring(
+                         root.chosenRestorePath.lastIndexOf("/") + 1), 80)
 
     // -- untrusted input
     /*
@@ -215,6 +246,85 @@ Panel {
 
     function pagePrevious() { root.historyPage = root.page - 1 }
     function pageNext() { root.historyPage = root.page + 1 }
+
+    // -- backup and restore
+    // Both are refused while a workout runs: the activity a backup would copy
+    // is mid-session, and a restore would replace it under the running belt.
+    function requestRestore(path) {
+        if (!root.canUseFiles) return
+        activityMenu.opened = false
+        root.chosenRestorePath = path
+        root.askingRestore = true
+        // The question lives on the panel, so the panel has to be the surface
+        // the user is looking at once they have picked a file.
+        if (!root.opened) root.open()
+    }
+
+    function confirmRestore() {
+        root.askingRestore = false
+        if (root.chosenRestorePath === "") return
+        // The old result goes now rather than sitting there until the timer
+        // would have cleared it, so the panel cannot claim the previous restore
+        // while this one is running.
+        root.runFileOp("restore", root.chosenRestorePath)
+        root.chosenRestorePath = ""
+    }
+
+    function cancelRestore() {
+        root.askingRestore = false
+        root.chosenRestorePath = ""
+    }
+
+    function reportFileOp(message) {
+        // Flattened here because this is shown as text: the message carries a
+        // file name that came out of a file chooser.
+        root.fileNotice = root.plain(message, 200)
+        // Long enough to read, short enough that reopening the panel later is
+        // not still reporting the last backup.
+        fileNoticeClear.restart()
+    }
+
+    function clearFileNotice() {
+        // Stopping the timer matters as much as emptying the text: a timer left
+        // running would clear the *next* message early.
+        fileNoticeClear.stop()
+        root.fileNotice = ""
+    }
+
+    function runFileOp(verb, path) {
+        if (!root.canUseFiles || backupProcess.running) return
+        if (typeof path !== "string" || path.charAt(0) !== "/") {
+            root.reportFileOp(root.filePrefix(verb) + "no file was chosen")
+            return
+        }
+        root.clearFileNotice()
+        root.fileVerb = verb
+        root.filePayload = JSON.stringify({ "path": path }) + "\n"
+        run(backupProcess, root.localCommand("backup", [verb]))
+    }
+
+    // What a failure notice starts with, so the helper's one-line reason reads
+    // as the result of the row the user pressed.
+    function filePrefix(verb) {
+        return verb === "restore" ? "Restore: " : "Backup: "
+    }
+
+    // What the helper printed, turned into one sentence. The reply is its own
+    // JSON, so the name is a string and is flattened here: it came out of a
+    // dialog and the shell renders this text.
+    function fileResult(verb, reply) {
+        if (!reply || reply.ok !== true)
+            return verb === "restore" ? "restored" : "backed up"
+        if (verb === "restore") {
+            var sessions = Number(reply.sessions)
+            if (!isFinite(sessions)) return "restored; the history it replaced is in backups/"
+            return sessions === 1
+                ? "Restored 1 workout; the history it replaced is in backups/"
+                : "Restored " + sessions + " workouts; the history it replaced is in backups/"
+        }
+        var name = root.plain(reply.name, 80)
+        return name ? "Wrote " + name : "Backed up"
+    }
 
     function send(command) {
         if (commandProcess.running) return
@@ -370,6 +480,12 @@ Panel {
 
     function applyState(document) {
         if (document.mode !== undefined && document.mode !== root.mode) root.mode = document.mode
+        // Where the helper keeps its files, so Location and the panel agree on
+        // one folder even when XDG_STATE_HOME moved it. Not `plain()`: this is
+        // handed to xdg-open as one argv element and shown as plain text, so
+        // `&` and `<` in a folder name must survive.
+        if (typeof document.stateDir === "string" && document.stateDir.charAt(0) === "/")
+            root.stateDir = document.stateDir.substring(0, 512)
         if (document.mac !== undefined && String(document.mac) !== root.mac) {
             root.mac = String(document.mac)
             root.macInput = root.mac
@@ -664,12 +780,108 @@ Panel {
     }
 
 
+    // A backup or a restore is one helper run. The chosen path is written on
+    // stdin, so it is not in the process's argv, and the helper walks it from
+    // the root before opening anything. `buffer` holds the one result line.
+    Process {
+        id: backupProcess
+        running: false
+        stdinEnabled: true
+        property string buffer: ""
+        property string failure: ""
+        stdout: SplitParser {
+            splitMarker: ""
+            onRead: function(chunk) {
+                if (backupProcess.buffer.length < root.outputLimit) backupProcess.buffer += chunk
+            }
+        }
+        stderr: SplitParser {
+            splitMarker: ""
+            onRead: function(chunk) {
+                if (backupProcess.failure.length <= 2048) backupProcess.failure += chunk
+            }
+        }
+        environment: root.helperEnvironment
+        clearEnvironment: true
+        onStarted: {
+            backupProcess.write(root.filePayload)
+            root.filePayload = ""
+            fileOpWatchdog.restart()
+        }
+        onExited: function(code) {
+            fileOpWatchdog.stop()
+            var verb = root.fileVerb
+            var output = backupProcess.buffer
+            var failure = root.plain(backupProcess.failure.trim(), 200)
+            root.fileVerb = ""
+            root.filePayload = ""
+            backupProcess.buffer = ""
+            backupProcess.failure = ""
+            // The watchdog has already said what happened. This exit is the
+            // helper it killed, not a second result.
+            if (root.fileTimedOut) {
+                root.fileTimedOut = false
+                return
+            }
+            if (code === 0) {
+                var reply = null
+                try { reply = JSON.parse(output.trim()) } catch (error) { reply = null }
+                root.reportFileOp(root.fileResult(verb, reply))
+                // A restore replaced the file, so the chain has to be re-read.
+                if (verb === "restore") root.refreshActivity()
+            } else {
+                root.reportFileOp(root.filePrefix(verb)
+                    + (failure || "the helper could not be run"))
+            }
+            // An export was asked for from the menu, and the panel is not the
+            // surface that is open, so the result goes back there. A restore
+            // already opened the panel on its question, and that is where the
+            // replaced history is, so the result stays on the panel. The
+            // condition is repeated without the file-operation flag, because
+            // `running` may still be set during this signal.
+            if (verb === "export" && !root.running && !root.paused && !root.sessionActive
+                    && root.pending === "")
+                activityMenu.opened = true
+        }
+    }
+
+
     // The helper answers config-set in well under a second. This is the backstop
     // that keeps a wedged write from holding a process handle open forever.
     Timer {
         id: configWatchdog
         interval: 5000
         onTriggered: if (configProcess.running) configProcess.signal(15)
+    }
+
+
+    // A backup copies one small file; a restore may read one from another
+    // volume. The deadline keeps a stuck helper from leaving the menu rows dead
+    // for the rest of the session.
+    Timer {
+        id: fileOpWatchdog
+        interval: 30000
+        onTriggered: {
+            if (!backupProcess.running) return
+            root.fileTimedOut = true
+            var verb = root.fileVerb
+            root.fileVerb = ""
+            root.filePayload = ""
+            backupProcess.signal(15)
+            root.reportFileOp(root.filePrefix(verb) + (verb === "restore"
+                ? "that file took too long to read" : "that backup took too long to write"))
+        }
+    }
+
+
+    // A backup or restore result is news, not a status line: five seconds, then
+    // it is gone. Restarted by reportFileOp() and stopped by clearFileNotice(),
+    // so a timer can never outlive the message it was started for.
+    Timer {
+        id: fileNoticeClear
+        interval: 5000
+        repeat: false
+        onTriggered: root.fileNotice = ""
     }
 
 
@@ -740,7 +952,12 @@ Panel {
     }
 
     onOpenedChanged: {
-        if (!opened) return
+        // A panel closed while the restore question was up must not reopen on
+        // that question later; the file was never confirmed.
+        if (!opened) {
+            root.cancelRestore()
+            return
+        }
         root.refresh()
         root.refreshActivity()
     }
@@ -758,6 +975,7 @@ Panel {
         if (configProcess.running) configProcess.signal(15)
         if (scanProcess.running) scanProcess.signal(15)
         if (activityPoll.running) activityPoll.signal(15)
+        if (backupProcess.running) backupProcess.signal(15)
     }
 
     // -- bar button
@@ -793,8 +1011,23 @@ Panel {
             ? Math.round(Style.bar.iconFont * 0.95)
             : Math.round(Style.bar.iconFont * 1.15)
         onPressed: function(pressed) {
-            if (pressed === Qt.RightButton) root.sendBelt("stop")
-            else root.toggle()
+            if (pressed !== Qt.RightButton) {
+                activityMenu.opened = false
+                root.toggle()
+                return
+            }
+            // Right, while the belt is in use: Stop, as it always was, even if
+            // the poll has not caught up with a Start yet.
+            if (root.running || root.paused || root.sessionActive
+                    || (root.busy && root.connected)) {
+                activityMenu.opened = false
+                root.sendBelt("stop")
+                return
+            }
+            // Right, while idle: backup, restore and the folder. Before the
+            // first workout there is nothing to keep, so the menu opens anyway;
+            // Back up explains that there is nothing yet.
+            activityMenu.opened = !activityMenu.opened
         }
 
         Rectangle {
@@ -818,6 +1051,17 @@ Panel {
         }
     }
 
+    ActivityMenu {
+        id: activityMenu
+        anchorItem: button
+        bar: root.bar
+        canUseFiles: root.canUseFiles
+        stateDir: root.stateDir
+        resultNotice: root.fileNotice
+        onExportRequested: function(path) { root.runFileOp("export", path) }
+        onRestoreRequested: function(path) { root.requestRestore(path) }
+    }
+
     // -- panel
     KeyboardPanel {
         id: dropdown
@@ -832,12 +1076,33 @@ Panel {
         PanelKeyCatcher {
             id: keyCatcher
             anchors.fill: parent
-            onCloseRequested: root.close()
-            onTabRequested: function(direction) { root.switchPanel(direction) }
+            onCloseRequested: {
+                // The restore question is modal over this content: Escape
+                // answers it rather than closing the panel underneath.
+                if (root.askingRestore) root.cancelRestore()
+                else root.close()
+            }
+            onTabRequested: function(direction) {
+                if (!root.askingRestore) root.switchPanel(direction)
+            }
             // Left and right page the activity strip; up and down are the shell's.
             onMoveRequested: function(dx) {
+                // While the question is open the arrows move its choice rather
+                // than paging the history behind it.
+                if (root.askingRestore) {
+                    restoreQuestion.selectedIndex = dx < 0 ? 0 : 1
+                    return
+                }
                 if (dx < 0) root.pagePrevious()
                 else if (dx > 0) root.pageNext()
+            }
+            onActivateRequested: {
+                if (root.askingRestore) restoreQuestion.selectedIndex
+                        ? root.confirmRestore() : root.cancelRestore()
+            }
+            onReturnRequested: {
+                if (root.askingRestore) restoreQuestion.selectedIndex
+                        ? root.confirmRestore() : root.cancelRestore()
             }
 
             Flickable {
@@ -918,6 +1183,19 @@ Panel {
                         seconds: root.lastSeconds
                         calories: root.lastCalories
                         estimated: root.lastCaloriesEstimated
+                    }
+
+                    // What the last backup or restore did. A restore is reported
+                    // here, beside the history it just replaced.
+                    Text {
+                        width: parent.width
+                        visible: root.fileNotice !== ""
+                        text: root.fileNotice
+                        textFormat: Text.PlainText
+                        color: Util.alpha(Color.foreground, 0.7)
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                        wrapMode: Text.WordWrap
                     }
 
                     PanelSeparator {
@@ -1269,6 +1547,27 @@ Panel {
                     }
                 }
             }
+        }
+
+        // The restore question, over the panel's content and on the same
+        // surface, so it takes the keys while it is open.
+        //
+        // A sibling of keyCatcher on purpose, not a child of the content above:
+        // QML will only anchor to a parent or a sibling, and anchoring to
+        // keyCatcher from anywhere else fails silently.
+        ConfirmDialog {
+            id: restoreQuestion
+            anchors.fill: keyCatcher
+            z: 10
+            opened: root.askingRestore
+            // The chosen file's name is the one variable in here, and it came
+            // out of a file chooser, so it is stripped before the shell renders
+            // it: that widget owns its Text item and cannot pin the format.
+            message: "Replace your activity with " + root.restoreFileName
+                    + "? The current activity is kept in backups/ first."
+            confirmText: "Restore"
+            onCanceled: root.cancelRestore()
+            onConfirmed: root.confirmRestore()
         }
     }
 }

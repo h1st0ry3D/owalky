@@ -20,6 +20,7 @@ pad's MAC address.
 | --- | --- | --- |
 | `python-bleak` | the BLE stack the helper uses | `sudo pacman -S python-bleak` |
 | `bluetoothd` | the host Bluetooth service | ships with Omarchy |
+| `zenity` | the Backup and Restore file chooser | ships with Omarchy |
 | `wl-clipboard` | optional, the panel's *Copy path* button | `sudo pacman -S wl-clipboard` |
 
 `python-bleak` has to be the **system** package. The panel runs the helper with
@@ -58,7 +59,9 @@ interpreted as anything but an address.
 
 ## Using it
 
-- **Left click** the bar icon to open the panel, **right click** to stop the belt.
+- **Left click** the bar icon to open the panel. **Right click** while the belt
+  is running stops it, as before. **Right click** while it is idle opens the
+  **Backup**, **Restore** and **Location** menu described below.
 - **Walk mode** caps the belt at 6.0 km/h, which is all the pad allows while the
   handle bar is down. **Run mode** lifts the cap to 12.0. The pad does not report
   which mode it is in, so the button in the panel is the source of truth and the
@@ -185,9 +188,47 @@ python3 -I owalky_helper.py --mac AA:BB:CC:DD:EE:FF start 2.0   # target speed i
 python3 -I owalky_helper.py --mac AA:BB:CC:DD:EE:FF speed 3.5
 echo '{"mode":"run"}' | python3 -I owalky_helper.py config-set   # lift the 6.0 cap
 python3 -I owalky_helper.py log 40
+echo '{"path":"/home/you/owalky_activity_2026-10-21.json"}' \
+  | python3 -I owalky_helper.py backup export     # copy the activity out
+echo '{"path":"/home/you/owalky_activity_2026-10-21.json"}' \
+  | python3 -I owalky_helper.py backup restore    # and put it back
 ```
 
 `--mac` may be omitted once an address is configured, or set with `OWALKY_MAC`.
+
+## Backup, restore and location
+
+Right-click the bar icon while the belt is idle.
+
+- **Backup** writes `activity.json`, as it is, to the place you pick. The
+  suggested name is `owalky_activity_<today>.json`.
+- **Restore** replaces your recorded workouts with a file you pick, after asking.
+  The activity it replaces is copied into `~/.local/state/owalky/backups/` first,
+  and only the newest ten of those copies are kept.
+- **Location** opens the folder the activity and those copies live in, which is
+  `~/.local/state/owalky/`. It needs neither of the two rows above, so it keeps
+  working where they cannot run, and it says what the folder is if the file
+  manager does not open.
+
+Backup and Restore are unavailable while a workout is running or paused; stop the
+belt first. A right click while it is running is still **Stop**. The result of a
+backup is shown on the menu; the result of a restore is shown on the panel, next
+to the history it just replaced.
+
+Picking the file needs `zenity`, which Omarchy already ships. Without it the menu
+says so and those two rows stay greyed out instead of appearing to do nothing.
+Location only needs `xdg-open`, which ships with the desktop.
+
+The chooser runs as a separate process, and that is deliberate. Qt's own file
+dialog runs the GTK file chooser and GIO inside the shell process, and a crash
+there would take the whole bar with it. As a process of its own, the same chooser
+is a window that can fail on its own.
+
+A backup is the activity file exactly as it is, so editing it and restoring it is
+the supported way to correct a chain or merge workouts from another machine. The
+incoming document is checked against the same schema as a recorded session:
+unknown keys are dropped, an entry with an unusable timestamp is skipped, and a
+file that holds no workouts is refused rather than erasing what is there.
 
 ## How it works
 
@@ -224,6 +265,7 @@ quirks of this particular pad.
   - `~/.config/owalky/config.json`: MAC address, last speed, walk/run mode
   - `~/.local/state/owalky/state.json`: current state and workout distance
   - `~/.local/state/owalky/activity.json`: one entry per recorded workout, in metres, seconds and kilocalories
+  - `~/.local/state/owalky/backups/pre-restore_<time>-<id>.json`: the activity a restore replaced, newest ten kept
   - `~/.local/state/owalky/owalky.log`: debug log, rotated at 256 KiB
   - `~/.local/state/owalky/daemon.pid`, `daemon.sock`: daemon identity and socket
 - The MAC address is a device identifier. It stays on this machine, in the files
@@ -232,6 +274,9 @@ quirks of this particular pad.
   (`O_NOFOLLOW`, owner-only, one link, size limit), and every write is an exclusive
   temporary plus `rename(2)`, so a symlink planted at one of these paths cannot
   redirect a read or a write.
+- A path picked in the Backup or Restore dialog is walked from `/` one component
+  at a time, refusing anything another account can write to, and a symlink on the
+  way is resolved and its target checked rather than followed blindly.
 - Helper output is length-capped in the helper and again in QML, and rendered as
   plain text.
 - The daemon is signalled by pid **and** start time, so a recycled pid is never
@@ -256,6 +301,7 @@ owalky/ftms.py       the FTMS codec, pure functions, no I/O
 owalky/scan.py       finding pads by the service they advertise
 owalky/storage.py    directory chains, bounded reads, atomic writes, the log
 owalky/activity.py   activity.json, the session document and its bounds
+owalky/backup.py     export and restore of activity.json, through a chosen path
 owalky/state.py      state.json, config.json, MAC resolution
 owalky/identity.py   /proc identity, so a pid is never trusted bare
 owalky/ipc.py        the control-socket client
@@ -278,6 +324,7 @@ and the helper, and leaves behind:
 | `~/.local/state/owalky/owalky.log` | kept | the debug log |
 | `~/.local/state/owalky/state.json` | kept | the last known state |
 | `~/.local/state/owalky/activity.json` | kept | your recorded workouts |
+| `~/.local/state/owalky/backups/` | kept | the copies a restore replaced |
 | `~/.local/state/owalky/daemon.pid`, `daemon.sock` | removed when the daemon exits | |
 
 To delete those as well, remove the two directories:

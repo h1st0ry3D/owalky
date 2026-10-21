@@ -297,8 +297,14 @@ class StatusDocumentTests(TempHomeTest):
                 "sessionDistance",
                 "sessionElapsed",
                 "speed",
+                "stateDir",
             ],
         )
+
+    def test_the_state_directory_is_the_one_the_files_live_in(self):
+        document = state.status_document()
+        self.assertEqual(document["stateDir"], os.path.dirname(document["log"]))
+        self.assertTrue(document["stateDir"].endswith(os.path.join(".local", "state", "owalky")))
 
     def test_state_without_a_daemon_is_not_reported_as_connected(self):
         with storage.state_dir() as dir_fd:

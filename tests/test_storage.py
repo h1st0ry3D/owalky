@@ -118,6 +118,21 @@ class DirectoryTests(TempHomeTest):
         with self.assertRaises(storage.StorageError):
             self.open_state()
 
+    def test_sweep_keeps_the_backups_directory_and_tightens_it(self):
+        backups = self.path(".local", "state", "owalky", storage.BACKUP_DIR_NAME)
+        os.makedirs(backups)
+        os.chmod(backups, 0o755)
+        with storage.state_dir() as dir_fd:
+            self.assertEqual(stat.S_IMODE(os.fstat(dir_fd).st_mode), 0o700)
+        self.assertTrue(os.path.isdir(backups))
+        self.assertEqual(stat.S_IMODE(os.stat(backups).st_mode), 0o700)
+
+    def test_the_snapshot_directory_is_created_private(self):
+        with storage.snapshot_dir() as dir_fd:
+            self.assertEqual(stat.S_IMODE(os.fstat(dir_fd).st_mode), 0o700)
+        backups = self.path(".local", "state", "owalky", storage.BACKUP_DIR_NAME)
+        self.assertEqual(stat.S_IMODE(os.stat(backups).st_mode), 0o700)
+
 
 class ReadTests(TempHomeTest):
     def setUp(self):

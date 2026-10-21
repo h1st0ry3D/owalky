@@ -15,6 +15,7 @@ at the destination instead of writing through it.
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import pwd
 import re
@@ -32,6 +33,8 @@ LOG_FILE = "owalky.log"
 PID_FILE = "daemon.pid"
 SOCKET_FILE = "daemon.sock"
 CONFIG_FILE = "config.json"
+#: Where a restore keeps the activity it is about to replace.
+BACKUP_DIR_NAME = "backups"
 
 MAX_STATE_BYTES = 64 * 1024
 MAX_ACTIVITY_BYTES = 64 * 1024
@@ -45,6 +48,10 @@ MAX_LOG_KEEP_BYTES = 64 * 1024
 MAX_LOG_TAIL_BYTES = 8 * 1024
 MAX_LOG_TAIL_LINES = 200
 MAX_SMALL_FILE_BYTES = 4096
+#: A chosen path is a path, but it is still a byte budget.
+MAX_PATH_LEN = 4096
+MAX_PATH_DEPTH = 40
+MAX_LINK_HOPS = 8
 
 _COMPONENT = re.compile(r"\A[A-Za-z0-9._-]+\Z")
 
@@ -103,12 +110,15 @@ def log_path() -> str:
     return os.path.join(state_path(), LOG_FILE)
 
 
-def open_dir(parts: list[str]) -> int:
+def open_dir(parts: list[str], keep_dirs: tuple[str, ...] = ()) -> int:
     """Walk ``parts`` from the home directory and return a directory descriptor.
 
     Missing components are created 0700. The leaf is tightened and swept on every
     call rather than only when it looks wrong: a directory that was once wider can
     hold entries this plugin did not put there.
+
+    ``keep_dirs`` names subdirectories that are part of the plugin's own layout.
+    They are kept and tightened to 0700 instead of being refused as foreign.
     """
     if not parts or not all(_COMPONENT.match(part) and part not in (".", "..") for part in parts):
         raise StorageError("refusing directory chain")
@@ -129,24 +139,29 @@ def open_dir(parts: list[str]) -> int:
                 raise StorageError(f"refusing directory component: {name}")
             if leaf:
                 os.fchmod(fd, 0o700)
-                sweep_dir(fd)
+                sweep_dir(fd, keep_dirs)
         return fd
     except BaseException:
         os.close(fd)
         raise
 
 
-def sweep_dir(dir_fd: int) -> None:
+def sweep_dir(dir_fd: int, keep_dirs: tuple[str, ...] = ()) -> None:
     """Drop entries in the plugin's own directory that it did not create.
 
     Symlinks and fifos are removed, regular files are forced back to 0600, and a
-    directory or a foreign-owned entry raises instead of being deleted.
+    directory or a foreign-owned entry raises instead of being deleted. The one
+    exception is a directory named in ``keep_dirs`` and owned by us, which is part
+    of the plugin's layout and is tightened instead.
     """
     for name in os.listdir(dir_fd):
         info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
         if info.st_uid != os.geteuid():
             raise StorageError(f"refusing foreign entry: {name}")
         if stat.S_ISDIR(info.st_mode):
+            if name in keep_dirs:
+                os.chmod(name, 0o700, dir_fd=dir_fd, follow_symlinks=False)
+                continue
             raise StorageError(f"unexpected directory in plugin state: {name}")
         if not (stat.S_ISREG(info.st_mode) or stat.S_ISSOCK(info.st_mode)):
             os.unlink(name, dir_fd=dir_fd)
@@ -157,7 +172,21 @@ def sweep_dir(dir_fd: int) -> None:
 @contextlib.contextmanager
 def state_dir() -> Iterator[int]:
     """Open the state directory for the duration of the block."""
-    fd = open_dir(state_components())
+    fd = open_dir(state_components(), keep_dirs=(BACKUP_DIR_NAME,))
+    try:
+        yield fd
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def snapshot_dir() -> Iterator[int]:
+    """Open the folder a restore keeps the replaced activity in.
+
+    Same rules as the state directory above it, with the leaf created on demand
+    and swept on every call.
+    """
+    fd = open_dir([*state_components(), BACKUP_DIR_NAME])
     try:
         yield fd
     finally:
@@ -219,6 +248,32 @@ def read_file_tail(dir_fd: int, name: str, limit: int, lines: int) -> str:
         os.close(fd)
 
 
+def read_chosen_file(dir_fd: int, name: str, limit: int) -> bytes | None:
+    """Read a file the user picked in their own dialog.
+
+    Unlike :func:`read_file`, the mode is not required to be 0600: a backup may
+    have come from a download or a USB stick. It still has to be a regular file
+    of ours with one link, within ``limit`` bytes, opened without following a
+    symlink at the leaf.
+    """
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise StorageError(f"refusing to read {name}: {exc.strerror}") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+            raise StorageError(f"refusing {name}: expected a plain file of yours")
+        if info.st_size > limit:
+            raise StorageError(f"refusing {name}: larger than {limit} bytes")
+        os.set_blocking(fd, True)
+        return _read_at_most(fd, limit, name)
+    finally:
+        os.close(fd)
+
+
 def write_file(dir_fd: int, name: str, data: bytes, limit: int) -> None:
     """Publish ``data`` as ``name`` through an exclusive temporary.
 
@@ -255,6 +310,157 @@ def remove_file(dir_fd: int, name: str) -> None:
     """Unlink ``name`` if it is there. Absence is not an error."""
     with contextlib.suppress(FileNotFoundError):
         os.unlink(name, dir_fd=dir_fd)
+
+
+# -- a path the user picked in a file dialog ---------------------------------
+#
+# This is the one path that is not under the plugin's state directory. It gets
+# its own walk: from the root, one component at a time with held descriptors,
+# refusing anything another account can write to. A symlinked component is
+# resolved by hand, against the directory that holds the link, and every
+# component of the result is checked again, so a link cannot shorten the walk.
+
+
+def _plain_component(name: object) -> bool:
+    """A name that can only mean one entry in a directory.
+
+    Deliberately more permissive than :data:`_COMPONENT`: a folder called
+    ``My Documents`` is ordinary, and the name is only ever passed to ``open``
+    with a directory descriptor, never joined into a path string.
+    """
+    return (
+        isinstance(name, str)
+        and 0 < len(name) <= 255
+        and name not in (".", "..")
+        and "/" not in name
+        and "\0" not in name
+    )
+
+
+def _link_components(base: list[str], target: str) -> list[str]:
+    """The components a symlink target stands for, applied to what has been
+    walked already. ``..`` pops the way the kernel pops it, and a target that
+    climbs past the root is refused rather than clamped to it."""
+    out = list(base)
+    for part in target.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not out:
+                raise StorageError("link target climbs above the root")
+            out.pop()
+            continue
+        if not _plain_component(part):
+            raise StorageError("refusing a link in the chosen path")
+        out.append(part)
+    return out
+
+
+def _check_chosen_dir(dir_fd: int, name: str) -> None:
+    """A directory on the way to a chosen path.
+
+    It has to be a real directory, owned by us or by root for the system ones
+    above the home, and not writable by another account: that is what would let
+    something redirect the write sideways. The sticky bit is the exception,
+    which is what makes /tmp the one shared directory that is safe to write
+    into.
+    """
+    info = os.fstat(dir_fd)
+    if not stat.S_ISDIR(info.st_mode):
+        raise StorageError(f"not a directory: {name}")
+    if info.st_uid not in (0, os.geteuid()):
+        raise StorageError(f"not yours: {name}")
+    if info.st_mode & 0o022 and not info.st_mode & 0o1000:
+        raise StorageError(f"{name} is writable by other accounts")
+
+
+def open_chosen_dir(parts: list[str]) -> int:
+    """Directory descriptor for the folder a chosen path names.
+
+    Walked one component at a time from the root with held descriptors. A
+    symlinked component is resolved here, unlike in the state chain, because
+    this path came out of the user's own file dialog and a Documents directory
+    symlinked onto a mounted disk is ordinary. The resolution is bounded, and
+    the target is checked like any other component, so the walk cannot be led
+    into a directory another account can write to.
+    """
+    if not parts or len(parts) > MAX_PATH_DEPTH or not all(_plain_component(part) for part in parts):
+        raise StorageError("refusing directory chain")
+    root_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    fd = os.dup(root_fd)
+    try:
+        pending = list(parts)
+        # The components opened so far, from the root. A relative symlink
+        # target is applied to these, not to nothing.
+        walked: list[str] = []
+        hops = 0
+        while pending:
+            name = pending.pop(0)
+            try:
+                nfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            except OSError as exc:
+                # A symlinked component fails here as ENOTDIR (with O_DIRECTORY)
+                # or ELOOP (without). Anything else, and anything that turns out
+                # not to be a link once looked at, is a real error: a plain file
+                # where a directory belongs, a name that is not there at all.
+                if exc.errno not in (errno.ENOTDIR, errno.ELOOP):
+                    raise
+                try:
+                    info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                except OSError:
+                    raise exc from None
+                if not stat.S_ISLNK(info.st_mode):
+                    if exc.errno == errno.ENOTDIR:
+                        raise StorageError(f"not a directory: {name}") from None
+                    raise
+                hops += 1
+                if hops > MAX_LINK_HOPS:
+                    raise StorageError("too many links in the chosen path") from None
+                target = os.readlink(name, dir_fd=fd)
+                if not target or len(target) > MAX_PATH_LEN or "\0" in target:
+                    raise StorageError("refusing a link in the chosen path") from None
+                # `pending` already dropped `name`, so the target replaces it and
+                # whatever was queued behind it follows the link. The walk then
+                # restarts from the root, so every component of the target is
+                # checked again.
+                if target.startswith("/"):
+                    pending = _link_components([], target) + pending
+                else:
+                    pending = _link_components(walked, target) + pending
+                if len(pending) > MAX_PATH_DEPTH:
+                    raise StorageError("chosen path too deep") from None
+                os.close(fd)
+                fd = os.dup(root_fd)
+                walked = []
+                continue
+            os.close(fd)
+            fd = nfd
+            _check_chosen_dir(fd, name)
+            walked.append(name)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+    finally:
+        os.close(root_fd)
+
+
+def chosen_path(path: object) -> tuple[int, str]:
+    """The directory descriptor and file name for a path the panel hands over.
+
+    The caller owns the descriptor. The leaf is a plain component: no
+    separator, no dot, nothing to traverse into.
+    """
+    if (not isinstance(path, str) or not path.startswith("/") or "\0" in path
+            or len(path) > MAX_PATH_LEN):
+        raise StorageError("refusing chosen path")
+    parts = [part for part in path.split("/") if part]
+    if not parts:
+        raise StorageError("refusing chosen path")
+    name = parts.pop()
+    if not _plain_component(name):
+        raise StorageError("refusing chosen file name")
+    return open_chosen_dir(parts), name
 
 
 def log_append(dir_fd: int, message: str) -> None:

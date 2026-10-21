@@ -17,6 +17,7 @@ import time
 
 from . import __version__
 from .activity import load_activity
+from .backup import export_activity, restore_activity
 from .daemon import run_daemon
 from .ftms import DEFAULT_MODE, clamp_speed, max_speed_for
 from .identity import daemon_alive, stop_daemon
@@ -29,6 +30,7 @@ from .storage import (
     MAX_LOG_BYTES,
     MAX_LOG_TAIL_BYTES,
     MAX_LOG_TAIL_LINES,
+    MAX_PATH_LEN,
     StorageError,
     home_dir,
     log_append,
@@ -88,6 +90,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subcommands.add_parser("log-clear", help="truncate the debug log")
     subcommands.add_parser("config-set", help="store configuration read from stdin as JSON")
+    backup_parser = subcommands.add_parser("backup", help="copy the activity to or from a file")
+    backup_modes = backup_parser.add_subparsers(dest="mode", required=True, metavar="MODE")
+    backup_modes.add_parser("export", help="write the activity to a file named on stdin")
+    backup_modes.add_parser("restore", help="replace the activity with a file named on stdin")
     subcommands.add_parser("daemon", description=argparse.SUPPRESS, help=argparse.SUPPRESS)
     return parser
 
@@ -104,6 +110,7 @@ def main(argv: list[str] | None = None) -> int:
         "log": command_log,
         "log-clear": command_log_clear,
         "config-set": command_config_set,
+        "backup": command_backup,
         "daemon": command_daemon,
     }
     handler = handlers.get(arguments.command)
@@ -183,6 +190,25 @@ def command_config_set(_arguments: argparse.Namespace) -> int:
     """Store the configuration the panel sends on stdin, as one JSON object."""
     save_config(read_stdin_json(MAX_CONFIG_BYTES))
     print("configuration saved")
+    return EXIT_OK
+
+
+def command_backup(arguments: argparse.Namespace) -> int:
+    """Copy the activity document from or to the file named on stdin.
+
+    The file's path is the one the user picked in their own dialog. It arrives in
+    the same bounded stdin document ``config-set`` reads, so it is never in a
+    process's argv, and the storage layer walks it before anything is opened.
+    """
+    request = read_stdin_json(MAX_CONFIG_BYTES, "backup request")
+    path = request.get("path")
+    if not isinstance(path, str) or not path or len(path) > MAX_PATH_LEN:
+        raise ValueError("backup request needs a path")
+    if arguments.mode == "restore":
+        result = restore_activity(path)
+    else:
+        result = export_activity(path)
+    print(json.dumps(result, separators=(",", ":")))
     return EXIT_OK
 
 
@@ -342,12 +368,13 @@ def bluetoothctl_disconnect(mac: str) -> int:
     return EXIT_FAILED
 
 
-def read_stdin_json(limit: int) -> dict:
+def read_stdin_json(limit: int, what: str = "configuration") -> dict:
     """Read one JSON object from stdin, without waiting for the writer to close.
 
     The panel writes the payload and leaves stdin open, so a read that waits for
     EOF never returns and the caller hangs. Each chunk is parsed as it arrives and
-    the read stops as soon as the document is whole.
+    the read stops as soon as the document is whole. ``what`` names the document
+    in the one error line, so a backup request is not called configuration.
     """
     chunks: list[bytes] = []
     total = 0
@@ -358,24 +385,24 @@ def read_stdin_json(limit: int) -> dict:
         chunks.append(chunk)
         total += len(chunk)
         try:
-            return _parse_config(b"".join(chunks))
+            return _parse_config(b"".join(chunks), what)
         except ValueError:
             continue
     if total > limit:
-        raise ValueError("configuration payload too large")
+        raise ValueError(f"{what} payload too large")
     if not chunks:
         return {}
-    return _parse_config(b"".join(chunks))
+    return _parse_config(b"".join(chunks), what)
 
 
-def _parse_config(payload: bytes) -> dict:
-    """Parse one configuration document, or raise why it cannot be used."""
+def _parse_config(payload: bytes, what: str = "configuration") -> dict:
+    """Parse one JSON document, or raise why it cannot be used."""
     try:
         document = json.loads(payload)
     except (ValueError, UnicodeDecodeError) as exc:
         raise ValueError(f"invalid JSON on stdin: {exc}") from exc
     if not isinstance(document, dict):
-        raise ValueError("configuration must be a JSON object")
+        raise ValueError(f"{what} must be a JSON object")
     return document
 
 

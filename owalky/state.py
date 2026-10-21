@@ -36,6 +36,7 @@ from .storage import (
     log_path,
     read_file,
     state_dir,
+    state_path,
     write_file,
 )
 
@@ -218,6 +219,7 @@ def status_document() -> dict:
         "mac": config.get("mac", ""),
         "lastSpeed": config.get("lastSpeed", 1.0),
         "log": log_path(),
+        "stateDir": state_path(),
     }
 
 
