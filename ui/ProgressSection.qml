@@ -6,7 +6,7 @@ import "../core/Progression.js" as Progression
 import "Status.js" as Status
 
 // The activity screen: the recorded workouts as discs, and what they add up to.
-// The treadmill controls above the section are what starts and ends a session;
+// The treadmill controls below the section are what starts and ends a session;
 // this section only reports what has already been logged.
 Column {
     id: progress

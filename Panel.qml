@@ -880,6 +880,46 @@ Panel {
                         }
                     }
 
+                    // The activity chain is for the stopped state: during a
+                    // workout the panel stays on the live controls and metrics,
+                    // and the history comes back with Start Treadmill.
+                    PanelSeparator {
+                        visible: !root.running
+                        foreground: Color.foreground
+                    }
+
+                    // One disc per workout, in the same shape as the pushup
+                    // tracker: the gap to the session before it sets the colour,
+                    // and the day bubble in the hero counts forward from the last
+                    // one. The treadmill controls below start and end a session.
+                    ProgressSection {
+                        width: parent.width
+                        visible: !root.running
+                        history: root.history
+                        page: root.page
+                        pageCount: root.pageCount
+                        trainingDays: root.trainingDays
+                        activityError: root.activityError
+                        onPreviousPageRequested: root.pagePrevious()
+                        onNextPageRequested: root.pageNext()
+                    }
+
+                    // The finished session's numbers sit directly below the chain.
+                    PanelSeparator {
+                        visible: !root.running && !root.sessionActive && root.history.length > 0
+                        foreground: Color.foreground
+                    }
+
+                    SessionMetrics {
+                        width: parent.width
+                        visible: !root.running && !root.sessionActive && root.history.length > 0
+                        label: "Last session"
+                        meters: root.lastMeters
+                        seconds: root.lastSeconds
+                        calories: root.lastCalories
+                        estimated: root.lastCaloriesEstimated
+                    }
+
                     PanelSeparator {
                         visible: root.connectionAreaVisible
                         foreground: Color.foreground
@@ -1021,6 +1061,24 @@ Panel {
                             font.pixelSize: 9
                             wrapMode: Text.WordWrap
                         }
+                    }
+
+                    // Live session numbers, only while a workout is active.
+                    // There is no block of zeroes before the first session, and
+                    // they sit above the speed and belt controls during one.
+                    PanelSeparator {
+                        visible: root.sessionActive
+                        foreground: Color.foreground
+                    }
+
+                    SessionMetrics {
+                        width: parent.width
+                        visible: root.sessionActive
+                        label: "This session"
+                        meters: root.sessionDistance
+                        seconds: root.sessionElapsed
+                        calories: root.sessionCalories
+                        estimated: root.sessionCaloriesEstimated
                     }
 
                     PanelSeparator { foreground: Color.foreground }
@@ -1208,64 +1266,6 @@ Panel {
                             font.pixelSize: Style.font.bodySmall
                             wrapMode: Text.WordWrap
                         }
-                    }
-
-                    // Live session numbers, only while a workout is active.
-                    // There is no block of zeroes before the first session.
-                    PanelSeparator {
-                        visible: root.sessionActive
-                        foreground: Color.foreground
-                    }
-
-                    SessionMetrics {
-                        width: parent.width
-                        visible: root.sessionActive
-                        label: "This session"
-                        meters: root.sessionDistance
-                        seconds: root.sessionElapsed
-                        calories: root.sessionCalories
-                        estimated: root.sessionCaloriesEstimated
-                    }
-
-                    // The activity chain is for the stopped state: during a
-                    // workout the panel stays on the live controls and metrics,
-                    // and the history comes back with Start Treadmill.
-                    PanelSeparator {
-                        visible: !root.running
-                        foreground: Color.foreground
-                    }
-
-                    // One disc per workout, in the same shape as the pushup
-                    // tracker: the gap to the session before it sets the colour,
-                    // and the day bubble in the hero counts forward from the last
-                    // one. The treadmill controls above start and end a session.
-                    ProgressSection {
-                        width: parent.width
-                        visible: !root.running
-                        history: root.history
-                        page: root.page
-                        pageCount: root.pageCount
-                        trainingDays: root.trainingDays
-                        activityError: root.activityError
-                        onPreviousPageRequested: root.pagePrevious()
-                        onNextPageRequested: root.pageNext()
-                    }
-
-                    // The finished session's numbers live below the chain; the
-                    // live block above only exists while the workout is active.
-                    PanelSeparator {
-                        visible: !root.running && !root.sessionActive && root.history.length > 0
-                        foreground: Color.foreground
-                    }
-
-                    SessionMetrics {
-                        width: parent.width
-                        visible: !root.running && !root.sessionActive && root.history.length > 0
-                        label: "Last session"
-                        meters: root.lastMeters
-                        seconds: root.lastSeconds
-                        calories: root.lastCalories
-                        estimated: root.lastCaloriesEstimated
                     }
                 }
             }

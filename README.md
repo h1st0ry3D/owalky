@@ -82,9 +82,10 @@ interpreted as anything but an address.
   ignores a speed sent with Start; raise it after the belt is running.
 - While a session runs, the panel hides the BLE address and Connect/Scan area so
   the workout controls and session numbers get the space.
-- The panel shows the live speed reported by the pad, the current state, and the
-  recorded activity. Below the treadmill controls, separated by a line, are the
-  session's distance in km, its active time and the estimated calories.
+- The panel opens on **My Activity** and the **Last session** numbers, then the
+  BLE address and Connect/Scan controls, then the treadmill controls. While a
+  session runs, its live distance in km, active time and estimated calories sit
+  above the speed and belt controls.
 
 > While idle the bar carries the days-since-last-workout disc. While the belt runs
 > it carries the kilometres of the current workout. A green dot means running, amber
@@ -115,7 +116,7 @@ the first session. Use the arrows above the discs, or the left and right arrow k
 to page through them. While the belt runs, the panel keeps the live controls and
 session metrics and hides the history chain; it returns when the belt stops.
 
-The live block under the treadmill controls shows the session's distance, active
+The live block above the treadmill controls shows the session's distance, active
 time and calories. It appears only while a workout is active.
 
 The FTMS **Treadmill Data** characteristic (`0x2ACD`) is a notify characteristic,

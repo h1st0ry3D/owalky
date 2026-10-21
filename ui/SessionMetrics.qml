@@ -5,9 +5,9 @@ import "../core/Progression.js" as Progression
 
 // One session's three live numbers: distance, active time and calories.
 //
-// The panel uses it twice: above the activity chain for the workout in progress,
-// and below the chain for the last recorded one. The caller owns visibility, so
-// there is no block of zeroes before the first session.
+// The panel uses it twice: below the activity chain for the last recorded one,
+// and above the treadmill controls for the workout in progress. The caller owns
+// visibility, so there is no block of zeroes before the first session.
 Column {
     id: metrics
 
